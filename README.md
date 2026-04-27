@@ -1,12 +1,18 @@
-# Cogram
+<p align="center">
+  <img src="assets/cogram-logo.svg" alt="Cogram" width="180"/>
+</p>
 
-**Intent-Aware Context Memory for LLM Agents**
+<h1 align="center">Cogram</h1>
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Docker Pulls (cogram-mcp)](https://img.shields.io/badge/ghcr.io-cogram--mcp-blue?logo=docker)](https://github.com/srk0102/cogram/pkgs/container/cogram-mcp)
-[![Docker Pulls (cogram-dashboard)](https://img.shields.io/badge/ghcr.io-cogram--dashboard-blue?logo=docker)](https://github.com/srk0102/cogram/pkgs/container/cogram-dashboard)
-[![Build Status](https://github.com/srk0102/cogram/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/srk0102/cogram/actions/workflows/docker-publish.yml)
-[![GitHub Repo stars](https://img.shields.io/github/stars/srk0102/cogram?style=social)](https://github.com/srk0102/cogram)
+<p align="center"><strong>Intent-Aware Context Memory for LLM Agents</strong></p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-F43F5E?style=flat-square" alt="License"/></a>
+  <a href="https://github.com/srk0102/cogram/pkgs/container/cogram-mcp"><img src="https://img.shields.io/badge/ghcr.io-cogram--mcp-F43F5E?style=flat-square&logo=docker&logoColor=white" alt="cogram-mcp image"/></a>
+  <a href="https://github.com/srk0102/cogram/pkgs/container/cogram-dashboard"><img src="https://img.shields.io/badge/ghcr.io-cogram--dashboard-F43F5E?style=flat-square&logo=docker&logoColor=white" alt="cogram-dashboard image"/></a>
+  <a href="https://github.com/srk0102/cogram/actions/workflows/docker-publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/srk0102/cogram/docker-publish.yml?branch=master&style=flat-square&label=build&color=F43F5E" alt="Build Status"/></a>
+  <a href="https://github.com/srk0102/cogram"><img src="https://img.shields.io/github/stars/srk0102/cogram?style=flat-square&color=F43F5E" alt="GitHub stars"/></a>
+</p>
 
 > **Note**
 >
