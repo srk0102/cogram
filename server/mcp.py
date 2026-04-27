@@ -1156,10 +1156,23 @@ def main() -> None:
             "profile_injection": PROFILE_INJECTION,
         })
 
+    # Trailing-slash compatibility: FastMCP's streamable_http_app serves at
+    # `/mcp` (no slash). Older clients configured `/mcp/` need to keep working,
+    # so we intercept the trailing-slash variant and forward to the canonical
+    # path WITHOUT a 307 redirect (which some MCP clients fail to follow with
+    # POST body intact).
+    async def mcp_trailing_slash_proxy(request):
+        # Reroute /mcp/ → forward inside the inner_app at /mcp
+        scope = dict(request.scope)
+        scope["path"] = "/mcp"
+        scope["raw_path"] = b"/mcp"
+        return await inner_app(scope, request.receive, request._send)  # type: ignore[arg-type]
+
     routes = [
         Route("/health", endpoint=health, methods=["GET"]),
         Route("/info", endpoint=info, methods=["GET"]),
-        # Everything else falls through to the FastMCP app (which owns /mcp/, /sse, /messages)
+        Route("/mcp/", endpoint=mcp_trailing_slash_proxy, methods=["GET", "POST", "DELETE"]),
+        # Everything else falls through to FastMCP (owns /mcp, /sse, /messages, etc.)
         Mount("/", app=inner_app),
     ]
 
