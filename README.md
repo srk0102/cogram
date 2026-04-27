@@ -84,36 +84,39 @@ If you delete any of those, you're left with something between graphiti and cogr
 
 ---
 
-## Install
+## Install — pull and run, no git clone needed
 
-Two paths depending on whether you want to modify cogram or just run it.
-
-### Option A — Just run it (Docker, no git)
-
-If you only want to use cogram and don't need the source code, grab the compose file and `.env.example` directly:
+Three commands. Cogram-mcp + dashboard images are published to GitHub Container Registry; the rest (Neo4j / Postgres / Redis) come from their official Docker Hub images. No build, no Python, no Node — just Docker.
 
 ```bash
 mkdir cogram && cd cogram
 curl -O https://raw.githubusercontent.com/srk0102/cogram/master/docker-compose.yml
 curl -O https://raw.githubusercontent.com/srk0102/cogram/master/.env.example
-mv .env.example .env             # then edit .env, paste your OPENAI_API_KEY
-docker compose up -d
+mv .env.example .env                                  # paste your OPENAI_API_KEY
+docker compose pull && docker compose up -d
 ```
 
-Six containers come up; cogram is reachable on `http://localhost:7800/mcp/`. No Python/Node/build tools needed locally — Docker pulls everything.
+That's it. Six containers come up:
 
-> Until cogram images are published to Docker Hub (planned, v0.2), `docker compose` will build images locally on first run, which takes ~3-5 minutes. After Docker Hub publish, first-run becomes a quick image pull.
+- `cogram-mcp` (port 7800) — pulled from `ghcr.io/srk0102/cogram-mcp:latest`
+- `cogram-dashboard` (port 7801) — pulled from `ghcr.io/srk0102/cogram-dashboard:latest`
+- `cogram-neo4j` — `neo4j:5.26` (Docker Hub)
+- `cogram-postgres` — `postgres:16-alpine` (Docker Hub)
+- `cogram-redis` — `redis:7-alpine` (Docker Hub)
+- `cogram-trainer` — opt-in via `--profile training`, deferred until enough samples
 
-### Option B — Clone the source (for developers / contributors)
+Cogram is reachable at `http://localhost:7800/mcp/`. Dashboard at `http://localhost:7801`.
+
+### For developers — clone the source
 
 ```bash
 git clone https://github.com/srk0102/cogram.git
 cd cogram
-cp .env.example .env             # paste OPENAI_API_KEY
-docker compose up -d
+cp .env.example .env
+docker compose up -d            # builds locally (no need to pull from ghcr.io)
 ```
 
-This gives you the full source tree to modify, plus the same six containers running.
+The `docker-compose.yml` has both `image:` (for pulls) and `build:` (for source clones) — same compose file works either way.
 
 ### What runs
 

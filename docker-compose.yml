@@ -70,8 +70,12 @@ services:
 
   # ==========================================================================
   # Cogram MCP server (stdio + HTTP/SSE on :7800/mcp)
+  # Image: pulled from ghcr.io by default. If unavailable (offline / fork),
+  # falls back to building from local source via the build: block.
   # ==========================================================================
   cogram-mcp:
+    image: ghcr.io/srk0102/cogram-mcp:latest
+    pull_policy: missing
     build:
       context: .
       dockerfile: containers/cogram-mcp/Dockerfile
@@ -166,8 +170,11 @@ services:
 
   # ==========================================================================
   # Cogram dashboard (FastAPI + force-graph viz + live metrics on :7801)
+  # Image: pulled from ghcr.io by default. Falls back to local build.
   # ==========================================================================
   cogram-dashboard:
+    image: ghcr.io/srk0102/cogram-dashboard:latest
+    pull_policy: missing
     build:
       context: .
       dockerfile: containers/cogram-dashboard/Dockerfile
