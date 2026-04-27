@@ -546,6 +546,49 @@ async def find_connections(entity_name: str, limit: int = 25) -> str:
 
 
 @mcp.tool()
+async def list_groups() -> str:
+    """List every distinct group_id in the graph, with episode + entity counts
+    and whether each group has a distilled :DirectorProfile yet.
+
+    Use this to discover what projects / contexts the user has memory for
+    before asking targeted questions. Common pattern: call list_groups() once
+    at session start, then route subsequent queries to the right group_id."""
+    g = _g()
+    # Query each tier separately, then merge in Python.
+    eps_q = "MATCH (e:Episodic) RETURN coalesce(e.group_id, 'default') AS gid, count(e) AS n"
+    ent_q = "MATCH (n:Entity) RETURN coalesce(n.group_id, 'default') AS gid, count(n) AS n"
+    pat_q = "MATCH (p:CognitivePattern) RETURN coalesce(p.group_id, 'default') AS gid, count(p) AS n"
+    knot_q = "MATCH (k:Entity) WHERE k.knot_narrative IS NOT NULL RETURN coalesce(k.group_id, 'default') AS gid, count(k) AS n"
+    profile_q = "MATCH (p:DirectorProfile) RETURN coalesce(p.group_id, 'default') AS gid"
+
+    async with g.driver.session() as session:
+        eps   = {r["gid"]: r["n"] for r in [r.data() async for r in await session.run(eps_q)]}
+        ents  = {r["gid"]: r["n"] for r in [r.data() async for r in await session.run(ent_q)]}
+        pats  = {r["gid"]: r["n"] for r in [r.data() async for r in await session.run(pat_q)]}
+        knots = {r["gid"]: r["n"] for r in [r.data() async for r in await session.run(knot_q)]}
+        profiles = {r["gid"] for r in [r.data() async for r in await session.run(profile_q)]}
+
+    all_gids = set(eps) | set(ents) | set(pats) | set(knots) | profiles
+    rows = sorted(
+        [
+            {
+                "group_id": gid,
+                "episodes": eps.get(gid, 0),
+                "entities": ents.get(gid, 0),
+                "patterns": pats.get(gid, 0),
+                "knots": knots.get(gid, 0),
+                "has_director_profile": gid in profiles,
+            }
+            for gid in all_gids
+        ],
+        key=lambda r: (-r["episodes"], -r["entities"]),
+    )
+    if not rows:
+        return json.dumps({"groups": [], "note": "No data yet. Use add_episode to start a memory."}, indent=2)
+    return json.dumps({"groups": rows, "total_groups": len(rows)}, indent=2, default=str)
+
+
+@mcp.tool()
 async def list_cognitive_patterns() -> str:
     """List every distinct cognitive_pattern label found in the graph,
     with how many edges carry each label."""
