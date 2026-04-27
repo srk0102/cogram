@@ -516,9 +516,11 @@ For deep architectural details — the five LLM call types, the three storage ti
 - Public Docker images on ghcr.io, anonymous pull works
 
 **Known limitations:**
-- ~~LLM annotator can confuse "context" with "user intent" on edges that mention competitors.~~ **Mitigated in v0.2** by the `edge_kind` taxonomy (`principle` / `action` / `context` / `competitor` / `unknown`) — context and competitor edges no longer pollute the Director profile. See [docs/annotator_flaw.md](docs/annotator_flaw.md) for the full write-up.
 - Trainer container (T2 LoRA per-node adapters) is opt-in via `docker compose --profile training up`, deferred until ≥50 samples per node.
 - Task registry is process-local in-memory; horizontal scale-out needs sticky routing per group_id.
+
+**Resolved in v0.2:**
+- ~~LLM annotator can confuse "context" with "user intent" on edges that mention competitors.~~ Three-layer fix: (1) the `edge_kind` taxonomy classifies every edge as `principle` / `action` / `context` / `competitor` / `unknown`, (2) profile distillation filters out `context` and `competitor` edges so they can't reinforce cognitive patterns, (3) `instructor` + a Pydantic `Literal` field rejects malformed `edge_kind` at parse time and auto-retries with the validation error fed back into the prompt. Live verified: a sentence mentioning "Mem0 uses Qdrant for embeddings" classifies as `competitor` with empty `director_vision` / `cognitive_pattern`. Full write-up: [docs/annotator_flaw.md](docs/annotator_flaw.md).
 
 **Shipped in v0.2:**
 - `edge_kind` field in `intent_meta` (`principle` / `action` / `context` / `competitor` / `unknown`) — see [docs/annotator_flaw.md](docs/annotator_flaw.md)
