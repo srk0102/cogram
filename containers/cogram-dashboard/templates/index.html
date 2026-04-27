@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>cogram dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0a0a0c;
+    --panel: rgba(20, 20, 26, 0.96);
+    --panel-border: #262631;
+    --fg: #e6e6ea;
+    --muted: #8a8a96;
+    --accent: #7cf4d4;
+    --accent2: #f4ad7c;
+    --warn: #f47c7c;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg);
+    font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; overflow: hidden; }
+
+  /* Graph fills the entire viewport, full width by default */
+  #graph { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 1; }
+
+  /* Header floats over the graph */
+  header { position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    padding: 10px 16px; background: linear-gradient(to bottom, rgba(10,10,12,0.85), transparent);
+    display: flex; align-items: center; gap: 12px; pointer-events: none; }
+  header > * { pointer-events: auto; }
+  header h1 { font-size: 14px; margin: 0; letter-spacing: 0.5px; }
+  header .status { color: var(--muted); font-size: 11px; }
+  header .right { margin-left: auto; display: flex; gap: 8px; }
+  button { background: var(--panel); border: 1px solid var(--panel-border);
+    color: var(--fg); padding: 6px 10px; font-family: inherit; font-size: 11px;
+    cursor: pointer; border-radius: 4px; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+
+  /* Side panels float over the graph; collapsible */
+  .panel { position: fixed; top: 50px; bottom: 16px; width: 320px;
+    background: var(--panel); backdrop-filter: blur(6px);
+    border: 1px solid var(--panel-border); border-radius: 6px;
+    overflow: auto; padding: 14px; z-index: 5;
+    transition: transform 0.2s ease;
+  }
+  .panel.left { left: 16px; }
+  .panel.right { right: 16px; width: 340px; }
+  .panel.left.hidden { transform: translateX(calc(-100% - 24px)); }
+  .panel.right.hidden { transform: translateX(calc(100% + 24px)); }
+  .panel.hidden { pointer-events: none; }
+
+  body.fullscreen .panel { transform: translateX(150%); pointer-events: none; }
+
+  .row { display: flex; justify-content: space-between; align-items: baseline;
+    padding: 5px 0; border-bottom: 1px dotted var(--panel-border); font-size: 12px; }
+  .row .k { color: var(--muted); }
+  .row .v { font-weight: 600; color: var(--fg); }
+  .v.accent { color: var(--accent); }
+  .v.warn { color: var(--warn); }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--muted); margin: 14px 0 6px; }
+  h2:first-child { margin-top: 0; }
+  ul.events { list-style: none; padding: 0; margin: 0; font-size: 11px; }
+  ul.events li { padding: 4px 0; border-bottom: 1px dotted var(--panel-border);
+    color: var(--muted); }
+  ul.events li b { color: var(--fg); }
+  .pill { display: inline-block; padding: 1px 5px; border-radius: 8px;
+    font-size: 9px; background: #2a2a35; color: var(--accent); margin-left: 4px; }
+  .pill.warn { background: #3a1a1a; color: var(--warn); }
+  .footer-note { margin-top: 12px; color: var(--muted); font-size: 10px; }
+</style>
+<script src="https://unpkg.com/force-graph@1.43.5/dist/force-graph.min.js"></script>
+</head>
+<body>
+
+<div id="graph"></div>
+
+<header>
+  <h1>cogram</h1>
+  <span class="status" id="status-text">connecting...</span>
+  <span class="status" id="last-updated"></span>
+  <div class="right">
+    <button id="toggle-left" class="active" title="Toggle left panel (metrics)">METRICS</button>
+    <button id="toggle-right" class="active" title="Toggle right panel (events)">EVENTS</button>
+    <button id="fullscreen" title="Show graph only — F">FULLSCREEN</button>
+    <button id="refresh-now" title="Refresh now — R">↻</button>
+  </div>
+</header>
+
+<section class="panel left" id="left-panel">
+  <h2>Graph</h2>
+  <div class="row"><span class="k">Entities</span><span class="v accent" id="n-entities">—</span></div>
+  <div class="row"><span class="k">Edges (RELATES_TO)</span><span class="v accent" id="n-edges">—</span></div>
+  <div class="row"><span class="k">Edges with intent_meta</span><span class="v" id="n-intent">—</span></div>
+  <div class="row"><span class="k">Nodes with vLLM narrative</span><span class="v" id="n-narr">—</span></div>
+  <div class="row"><span class="k">Episodic events</span><span class="v" id="n-episodic">—</span></div>
+
+  <h2>Hot tier (Redis)</h2>
+  <div class="row"><span class="k">Active sessions</span><span class="v accent" id="n-sessions">—</span></div>
+
+  <h2>Warm tier (Engram)</h2>
+  <div class="row"><span class="k">Cache entries</span><span class="v accent" id="n-cache">—</span></div>
+  <div class="row"><span class="k">Avg confidence</span><span class="v" id="avg-conf">—</span></div>
+
+  <h2>Today's spend</h2>
+  <div class="row"><span class="k">LLM calls</span><span class="v" id="calls">—</span></div>
+  <div class="row"><span class="k">Cost (USD)</span><span class="v accent" id="cost">—</span></div>
+
+  <h2>Trainer</h2>
+  <div class="row"><span class="k">Mode</span><span class="v" id="trainer-mode">—</span></div>
+  <div class="row"><span class="k">Loaded adapter</span><span class="v" id="trainer-adapter">—</span></div>
+  <div class="row"><span class="k">Training</span><span class="v" id="trainer-training">—</span></div>
+  <div class="row"><span class="k">VRAM used</span><span class="v" id="trainer-vram">—</span></div>
+
+  <p class="footer-note">event-driven · keyboard: F = fullscreen, R = refresh, [ ] = toggle panels</p>
+</section>
+
+<section class="panel right" id="right-panel">
+  <h2>Recent training runs</h2>
+  <ul class="events" id="runs"></ul>
+  <h2>Cache events</h2>
+  <ul class="events" id="events"></ul>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let graph = null;
+
+function bindControls() {
+  const left = $("left-panel"), right = $("right-panel");
+  const tL = $("toggle-left"), tR = $("toggle-right"), fs = $("fullscreen");
+
+  function syncBtn(btn, hidden) {
+    btn.classList.toggle("active", !hidden);
+  }
+
+  tL.onclick = () => { left.classList.toggle("hidden");  syncBtn(tL, left.classList.contains("hidden")); resizeGraph(); };
+  tR.onclick = () => { right.classList.toggle("hidden"); syncBtn(tR, right.classList.contains("hidden")); resizeGraph(); };
+  fs.onclick = () => {
+    document.body.classList.toggle("fullscreen");
+    fs.classList.toggle("active", document.body.classList.contains("fullscreen"));
+    resizeGraph();
+  };
+  $("refresh-now").onclick = () => refresh();
+
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT") return;
+    if (e.key === "f" || e.key === "F") fs.click();
+    else if (e.key === "r" || e.key === "R") refresh();
+    else if (e.key === "[") tL.click();
+    else if (e.key === "]") tR.click();
+  });
+}
+
+function resizeGraph() {
+  if (graph && graph.width) {
+    setTimeout(() => {
+      graph.width(window.innerWidth).height(window.innerHeight);
+    }, 250);
+  }
+}
+
+window.addEventListener("resize", resizeGraph);
+
+async function refreshStats() {
+  try {
+    const stats = await fetch("/api/stats").then(r => r.json());
+    const ent = (stats.nodes && stats.nodes.Entity) || 0;
+    const epi = (stats.nodes && stats.nodes.Episodic) || 0;
+    $("n-entities").textContent = ent;
+    $("n-edges").textContent = stats.relates_to_edges ?? "—";
+    $("n-intent").textContent = stats.edges_with_intent ?? "—";
+    $("n-narr").textContent = stats.nodes_with_narrative ?? "—";
+    $("n-episodic").textContent = epi;
+    $("n-sessions").textContent = stats.active_sessions ?? "—";
+    $("n-cache").textContent = stats.cache_entries ?? "—";
+    $("avg-conf").textContent = stats.cache_avg_confidence ?? "—";
+    if (stats.spend_today) {
+      $("calls").textContent = stats.spend_today.calls;
+      $("cost").textContent = "$" + Number(stats.spend_today.cost_usd).toFixed(4);
+    }
+    if (stats.trainer) {
+      $("trainer-mode").textContent = stats.trainer.mode || "—";
+      $("trainer-adapter").textContent = stats.trainer.loaded_adapter || "—";
+      $("trainer-training").textContent = stats.trainer.training ? "yes" : "no";
+      const gpu = stats.trainer.gpu;
+      if (gpu && gpu.available) {
+        $("trainer-vram").textContent = gpu.used_gb + "/" + gpu.total_gb + " GB";
+      } else {
+        $("trainer-vram").textContent = "no GPU";
+      }
+    } else if (stats.trainer_error) {
+      $("trainer-mode").textContent = "(unreachable)";
+    }
+    refreshAuditEvents();
+  } catch (e) { $("status-text").textContent = "○ stats error: " + e; }
+}
+
+async function refreshTrainingRuns() {
+  try {
+    const runs = await fetch("/api/training_runs").then(r => r.json());
+    const runsList = $("runs"); runsList.innerHTML = "";
+    if (Array.isArray(runs) && runs.length) {
+      for (const r of runs.slice(0, 8)) {
+        const li = document.createElement("li");
+        const cls = r.status === "success" ? "" : (r.status === "failed" ? "warn" : "");
+        li.innerHTML = `<b>${(r.node_id||"").slice(0,8)}</b> · ${r.samples_used} samples · ${r.backend} <span class="pill ${cls}">${r.status}</span>`;
+        runsList.appendChild(li);
+      }
+    } else {
+      runsList.innerHTML = "<li>(no runs yet)</li>";
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function refreshAuditEvents() {
+  try {
+    const events = await fetch("/api/recent_events").then(r => r.json());
+    const evList = $("events"); evList.innerHTML = "";
+    if (Array.isArray(events) && events.length) {
+      for (const e of events.slice(0, 20)) {
+        const li = document.createElement("li");
+        li.innerHTML = `<b>${e.source}</b> ${e.decision} <span class="pill">${(e.pattern_id||"").slice(0,6)}</span>`;
+        evList.appendChild(li);
+      }
+    } else {
+      evList.innerHTML = "<li>(no events yet)</li>";
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function refreshGraph() {
+  try {
+    const g = await fetch("/api/graph?limit=300").then(r => r.json());
+    if (graph) {
+      graph.graphData(g);
+    } else {
+      graph = ForceGraph()(document.getElementById("graph"))
+        .width(window.innerWidth)
+        .height(window.innerHeight)
+        .backgroundColor("#0a0a0c")
+        .nodeLabel(n => n.label)
+        .nodeAutoColorBy("has_narrative")
+        .nodeRelSize(4)
+        .linkLabel(l => l.label)
+        .linkColor(() => "#3a3a45")
+        .linkDirectionalArrowLength(3)
+        .linkDirectionalArrowRelPos(1)
+        .linkCurvature(0.05);
+      graph.graphData(g);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function refresh() {
+  // Manual full-refresh (R key, ↻ button, or initial page load)
+  await Promise.all([refreshStats(), refreshTrainingRuns(), refreshGraph()]);
+  $("last-updated").textContent = new Date().toLocaleTimeString() + " · manual";
+}
+
+// Event-driven only. ZERO polling intervals. Refresh runs on:
+//   - Initial page load
+//   - SSE event from Redis pub/sub (writers fire when data changes)
+//   - User pressing R or clicking ↻ button
+let evtSource = null;
+
+function connectStream() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource("/api/events");
+  evtSource.onopen = () => {
+    $("status-text").textContent = "● live (event stream)";
+  };
+  evtSource.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+    if (msg.channel === "heartbeat") return;
+
+    // Refresh just the slices that changed
+    const ch = msg.channel || "";
+    if (ch === "graph_change" || ch.startsWith("webhook:graph")) {
+      refreshGraph();
+      refreshStats();
+    } else if (ch === "cache_change" || ch === "spend_change") {
+      refreshStats();
+    } else if (ch === "training_change") {
+      refreshTrainingRuns();
+      refreshStats();
+    } else if (ch === "narrative_change") {
+      refreshGraph();
+      refreshStats();
+    } else if (ch === "session_change") {
+      refreshStats();
+    } else {
+      // Unknown channel — refresh everything to be safe
+      refresh();
+    }
+    $("last-updated").textContent = new Date().toLocaleTimeString() + " · " + ch;
+  };
+  evtSource.onerror = () => {
+    $("status-text").textContent = "○ stream disconnected (auto-reconnecting...)";
+    // EventSource auto-reconnects; nothing else to do
+  };
+}
+
+bindControls();
+refresh();           // one-time initial fetch
+connectStream();     // long-lived event subscription
+</script>
+</body>
+</html>

@@ -1,0 +1,238 @@
+services:
+  # ==========================================================================
+  # Cold tier: Neo4j (graph source of truth)
+  # ==========================================================================
+  neo4j:
+    image: neo4j:5.26
+    container_name: cogram-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/password
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP:-512m}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-256m}
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -O - --quiet http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cogram
+
+  # ==========================================================================
+  # Hot tier: Redis (active subgraph cache)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: cogram-redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./containers/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - cogram
+
+  # ==========================================================================
+  # Warm tier: Postgres (Engram decision cache + audit + training_data)
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: cogram-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: cogram
+      POSTGRES_PASSWORD: cogram
+      POSTGRES_DB: cogram
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./containers/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cogram -d cogram"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - cogram
+
+  # ==========================================================================
+  # Cogram MCP server (stdio + HTTP/SSE on :7800/mcp)
+  # ==========================================================================
+  cogram-mcp:
+    build:
+      context: .
+      dockerfile: containers/cogram-mcp/Dockerfile
+    container_name: cogram-mcp
+    ports:
+      - "7800:7800"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      GRAPHITI_LLM_MODEL: ${GRAPHITI_LLM_MODEL:-gpt-4o-mini}
+      ANNOTATOR_LLM_MODEL: ${ANNOTATOR_LLM_MODEL:-gpt-4o-mini}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-150}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      REDIS_URL: redis://redis:6379/0
+      POSTGRES_DSN: postgresql://cogram:cogram@postgres:5432/cogram
+      TRAINER_URL: http://cogram-trainer:7900
+      MCP_HTTP_PORT: 7800
+      MAX_DAILY_INGEST_CALLS: ${MAX_DAILY_INGEST_CALLS:-300}
+      COGRAM_FULL_PIPELINE: "true"
+    volumes:
+      - cogram_episodes:/app/episodes
+      - cogram_cache:/app/cache
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7800/health')"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - cogram
+
+  # ==========================================================================
+  # Baseline MCP server — same graph, NO profile injection (acts like stock graphiti)
+  # Use for A/B testing against the full cogram-mcp service.
+  # ==========================================================================
+  cogram-mcp-baseline:
+    build:
+      context: .
+      dockerfile: containers/cogram-mcp/Dockerfile
+    container_name: cogram-mcp-baseline
+    ports:
+      - "7802:7802"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      GRAPHITI_LLM_MODEL: ${GRAPHITI_LLM_MODEL:-gpt-4o-mini}
+      ANNOTATOR_LLM_MODEL: ${ANNOTATOR_LLM_MODEL:-gpt-4o-mini}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-150}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      REDIS_URL: redis://redis:6379/0
+      POSTGRES_DSN: postgresql://cogram:cogram@postgres:5432/cogram
+      MCP_HTTP_PORT: 7802
+      COGRAM_PROFILE_INJECTION: "false"
+      COGRAM_SERVER_NAME: "graphiti-baseline"
+    volumes:
+      - cogram_episodes:/app/episodes
+      - cogram_cache:/app/cache
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "cogram.server.mcp", "--http", "--host", "0.0.0.0", "--port", "7802"]
+    networks:
+      - cogram
+
+  # ==========================================================================
+  # Cogram trainer (Qwen 2.5 1.5B + PEFT + LoRA scheduler)
+  # GPU optional; falls back to CPU. Uses VRAM coexistence (5-layer).
+  # ==========================================================================
+  cogram-trainer:
+    build:
+      context: .
+      dockerfile: containers/cogram-trainer/Dockerfile
+    container_name: cogram-trainer
+    ports:
+      - "7900:7900"
+    environment:
+      POSTGRES_DSN: postgresql://cogram:cogram@postgres:5432/cogram
+      BASE_MODEL: ${BASE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
+      TRAINER_VRAM_FRACTION: ${TRAINER_VRAM_FRACTION:-0.40}
+      TRAINER_GPU_UTIL_PAUSE: ${TRAINER_GPU_UTIL_PAUSE:-50}
+      TRAINER_SCHEDULE: ${TRAINER_SCHEDULE:-02:00-06:00}
+      TRAINER_REQUIRE_USER_IDLE: ${TRAINER_REQUIRE_USER_IDLE:-false}
+      TRAINER_MIN_SAMPLES: ${TRAINER_MIN_SAMPLES:-20}
+      TRAINER_MIN_DAYS_BETWEEN: ${TRAINER_MIN_DAYS_BETWEEN:-7}
+      HF_HOME: /app/hf_cache
+    volumes:
+      - cogram_adapters:/cogram/adapters
+      - cogram_hf_cache:/app/hf_cache
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - cogram
+    # If you have no NVIDIA GPU, comment out the deploy.resources block above.
+
+  # ==========================================================================
+  # Cogram dashboard (FastAPI + force-graph viz + live metrics on :7801)
+  # ==========================================================================
+  cogram-dashboard:
+    build:
+      context: .
+      dockerfile: containers/cogram-dashboard/Dockerfile
+    container_name: cogram-dashboard
+    ports:
+      - "7801:7801"
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      REDIS_URL: redis://redis:6379/0
+      POSTGRES_DSN: postgresql://cogram:cogram@postgres:5432/cogram
+      MCP_URL: http://cogram-mcp:7800
+      DASHBOARD_PORT: 7801
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - cogram
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:
+  postgres_data:
+  cogram_episodes:
+  cogram_cache:
+  cogram_adapters:
+  cogram_hf_cache:
+
+networks:
+  cogram:
+    driver: bridge

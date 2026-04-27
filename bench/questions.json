@@ -1,0 +1,34 @@
+[
+  {
+    "q": "Would I approve a PR that adds Redis as a new dependency without justification?",
+    "ideal": "No. The user demands justification before adopting new dependencies; values cost-aware prototyping; rejects structural changes without their 'why' captured."
+  },
+  {
+    "q": "What kind of architectural pattern would I gravitate toward for a memory system?",
+    "ideal": "Layered cache: cold (Neo4j) + warm (Engram/Postgres) + hot (Redis), event-driven updates, write-time precomputation, intent annotation per edge."
+  },
+  {
+    "q": "How do I feel about LoRA-per-entity training as a differentiator?",
+    "ideal": "Useful as the eventual T2 path but not differentiated alone; LoRA is commodity. The novel piece is graph-shaped narration with cached perspectives generated at write-time."
+  },
+  {
+    "q": "If a dashboard polled a database every 5 seconds for UI updates, what would I think?",
+    "ideal": "I'd reject it. Production-grade dashboards push via SSE/webhooks when data actually changes; polling wastes resources and isn't event-driven."
+  },
+  {
+    "q": "Would I prefer to use mem0 or build my own memory layer?",
+    "ideal": "Build my own — mem0 charges for graph features, has fact-only memory without intent annotation, and costs blow up at scale. Custom layer with Engram cache + Redis hot tier survives 1M users without bankrupting the company."
+  },
+  {
+    "q": "What is the primary novel idea behind cogram vs other AI memory products?",
+    "ideal": "The graph itself is articulate: each hot node has a cached narrated perspective produced at write-time, and selected nodes evolve into vertical LLMs (LoRA adapters trained on accumulated logs). Memory becomes computation, not passive storage."
+  },
+  {
+    "q": "Should I cache LLM responses or cache the active graph subset?",
+    "ideal": "Cache the active subgraph in Redis. Caching individual LLM responses is small-value because most prompts are novel. The active subgraph is what gets queried thousands of times per session — that's where the latency win lives."
+  },
+  {
+    "q": "When should the vLLM at a node rewrite its narrative?",
+    "ideal": "Only on detected drift, never on every interaction. Cosine similarity gatekeeper at tiered thresholds (0.92 edge / 0.80 node / 0.95 profile) plus explicit-contradiction classifier override. Confidence increments on alignment, resets on drift."
+  }
+]

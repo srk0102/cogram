@@ -1,0 +1,59 @@
+# ----------------------------------------------------------------------------
+# Cogram .gitignore
+# ----------------------------------------------------------------------------
+
+# --- Secrets & local config ---
+.env
+.env.local
+.env.production
+.mcp.json
+
+# --- Python build artifacts ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.pyright/
+build/
+dist/
+
+# --- User runtime data (per-installation, never shared) ---
+director_profile.json
+episodes/*
+!examples/episodes/sample_*.md
+episodes_old/
+episodes_holding/
+cache/
+data/
+
+# --- Build / runtime logs ---
+bootstrap.log
+*.log
+
+# --- Benchmark artifacts (regenerable) ---
+bench/_mem0_qdrant/
+bench/results_*.json
+bench/report_*.md
+bench/__pycache__/
+
+# --- Legacy snapshots (deleted post-merge) ---
+_legacy_cogram_wrapper/
+
+# --- Private session docs (never go public) ---
+HR_AB_TEST.md
+cogram-results-with-cluade.md
+
+# --- OS-specific ---
+.DS_Store
+Thumbs.db
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo

@@ -1,0 +1,40 @@
+Cogram
+Copyright 2026 Siva Rama Krishna
+
+Licensed under the Apache License, Version 2.0 (the "License").
+You may obtain a copy of the License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+================================================================================
+
+This product is a fork of and includes software developed by:
+
+    Graphiti
+    Copyright 2024-2025 Zep AI Research, Inc.
+    https://github.com/getzep/graphiti
+    Licensed under the Apache License, Version 2.0
+
+The graphiti core (temporal knowledge-graph framework) lives inside the
+`cogram/` package. Cogram modifies and extends it with:
+
+  - per-edge intent annotation (why_connected / director_vision /
+    cognitive_pattern)
+  - per-node narrative synthesis (vllm_narrative)
+  - DirectorProfile + CognitivePattern distillation
+  - Engram-style LLM decision cache (Postgres-backed)
+  - Redis active subgraph hot tier
+  - Knot detection + Gemma-synthesized narratives
+  - MCP server (stdio + HTTP/SSE) and dashboard
+
+Apache License Section 4(d) requires that any redistribution or derivative
+work preserve this NOTICE file unchanged.
+
+In addition to the Apache 2.0 NOTICE preservation requirement, forks and
+derivative products of cogram MUST retain visible attribution to:
+
+  - "Cogram by Siva Rama Krishna"
+  - "Built on Graphiti by Zep AI Research"
+
+in their README, documentation, and any user-facing surface. See
+ATTRIBUTION.md for the human-readable explanation of these rules.

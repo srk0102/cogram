@@ -1,0 +1,27 @@
+# Cogram dependencies. The cogram package itself is installed via `pip install -e .`
+# from pyproject.toml. This file is for environments without setuptools.
+# Cogram is one package (forked graphiti baked in) — no separate graphiti install.
+
+# Core (forked-graphiti deps + cogram-specific)
+pydantic>=2.11.5
+neo4j>=5.26.0
+openai>=1.91.0
+tenacity>=9.0.0
+numpy>=1.0.0
+python-dotenv>=1.0.1
+
+# MCP server (stdio + HTTP/SSE)
+mcp[cli]>=1.2
+starlette>=0.36
+uvicorn[standard]>=0.32
+httpx>=0.27
+
+# Postgres (Engram warm cache + audit)
+asyncpg>=0.29
+
+# Redis (active subgraph hot tier + pub/sub events)
+redis>=5.1
+
+# Optional graph DB drivers (benchmark / alternative providers)
+# falkordb>=1.1.2,<2.0.0
+# kuzu>=0.11.3

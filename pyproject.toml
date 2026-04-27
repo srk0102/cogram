@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cogram"
+version = "0.1.0"
+description = "Intent-aware memory layer for LLM agents. Forked from Graphiti, with per-edge WHY annotation, DirectorProfile distillation, Engram cache, Redis active subgraph, and Gemma-synthesized knot narratives."
+readme = "README.md"
+requires-python = ">=3.10,<4"
+license = "Apache-2.0"
+authors = [
+    { name = "Siva Rama Krishna" },
+]
+keywords = ["agent", "memory", "knowledge-graph", "graphiti", "mcp", "llm", "cognition", "intent", "context-engineering", "fork"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    # Forked-graphiti core deps
+    "pydantic>=2.11.5",
+    "neo4j>=5.26.0",
+    "openai>=1.91.0",
+    "tenacity>=9.0.0",
+    "numpy>=1.0.0",
+    "python-dotenv>=1.0.1",
+    # Cogram-specific deps
+    "mcp[cli]>=1.2",
+    "httpx>=0.27",
+    "asyncpg>=0.29",
+    "redis>=5.1",
+    "starlette>=0.36",
+    "uvicorn>=0.27",
+]
+
+[project.optional-dependencies]
+falkordb = ["falkordb>=1.1.2,<2.0.0"]
+kuzu = ["kuzu>=0.11.3"]
+anthropic = ["anthropic>=0.49.0"]
+gemini = ["google-genai>=1.62.0"]
+groq = ["groq>=0.2.0"]
+voyage = ["voyageai>=0.2.3"]
+all = [
+    "falkordb>=1.1.2,<2.0.0",
+    "kuzu>=0.11.3",
+    "anthropic>=0.49.0",
+    "google-genai>=1.62.0",
+    "groq>=0.2.0",
+    "voyageai>=0.2.3",
+]
+dev = [
+    "pytest>=7",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.5",
+    "pyright>=1.1.404",
+]
+
+[project.scripts]
+cogram-mcp = "cogram.server.mcp:main"
+cogram-pipeline = "cogram.pipeline.runner:main"
+cogram-watch = "cogram.pipeline.watch:cli"
+cogram-ingest = "cogram.pipeline.ingest:main"
+cogram-import = "cogram.pipeline.import_transcripts:cli"
+cogram-cache = "cogram.llm_client.engram:cli"
+
+[project.urls]
+Homepage = "https://github.com/srk0102/cogram"
+Repository = "https://github.com/srk0102/cogram"
+Issues = "https://github.com/srk0102/cogram/issues"
+"Upstream (graphiti)" = "https://github.com/getzep/graphiti"
+
+# The repo root IS the cogram package: pyproject.toml + project meta files +
+# __init__.py + cogram.py + py.typed all sit at the same level.
+# Package "cogram" maps to "." (this directory). Sub-packages (core, driver,
+# embedder, llm_client, prompts, search, utils, models, cross_encoder,
+# namespaces, migrations, telemetry, pipeline, server) are auto-discovered
+# under "." and become cogram.core, cogram.driver, etc. via the package_dir
+# remap.
+[tool.setuptools]
+package-dir = { "cogram" = "." }
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["tests*", "bench*", "containers*", "scripts*", "examples*", "docs*"]
+
+[tool.setuptools.package-data]
+cogram = ["*.md", "py.typed"]
