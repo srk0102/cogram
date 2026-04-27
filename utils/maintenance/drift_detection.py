@@ -19,8 +19,6 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from openai import AsyncOpenAI
-
 from cogram.driver.redis_active import cosine
 from cogram.core.config import Settings
 from cogram.llm_client.engram import Policy
@@ -108,24 +106,35 @@ def _get_classifier_policy(settings: Settings) -> Policy:
     if _classifier_policy is not None:
         return _classifier_policy
 
-    client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
+    # Contradiction classifier is a small-tier call (one-shot, 120 tokens out).
+    # instructor enforces ContradictionDecision; on parse failure it auto-retries.
+    from cogram.llm_client.structured import (
+        ContradictionDecision,
+        make_structured_client,
+    )
+    client = make_structured_client(
+        api_key=settings.small_llm_api_key,
+        base_url=settings.small_llm_base_url,
+    )
 
     async def brain(turn: str) -> dict:
+        # The Policy cache wrapper doesn't surface group_id at this layer, so
+        # the contradiction classifier shares the 'default' rate-limit bucket.
+        # That's acceptable: the call is cheap (120 tokens), aggressively
+        # cached by turn text, and fires at most once per drift signal.
         await _rate_acquire()
-        resp = await client.chat.completions.create(
-            model=settings.graphiti_llm_model,
-            messages=[{"role": "user", "content": CLASSIFIER_PROMPT.format(turn=turn)}],
-            temperature=0.0,
-            max_tokens=120,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        # Robust JSON extraction
         try:
-            start, end = text.find("{"), text.rfind("}")
-            if start == -1 or end == -1:
-                return {"is_contradiction": False, "phrase": ""}
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
+            decision: ContradictionDecision = await client.chat.completions.create(
+                model=settings.small_llm_model,
+                messages=[{"role": "user", "content": CLASSIFIER_PROMPT.format(turn=turn)}],
+                response_model=ContradictionDecision,
+                temperature=0.0,
+                max_tokens=120,
+            )
+            return decision.model_dump()
+        except Exception:
+            # Drift detection must never block writes; default to no-contradiction
+            # if instructor exhausts retries or the provider rejects the call.
             return {"is_contradiction": False, "phrase": ""}
 
     _classifier_policy = Policy(

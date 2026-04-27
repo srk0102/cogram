@@ -21,10 +21,10 @@ import time
 from typing import Any, Optional
 
 import httpx
-from openai import AsyncOpenAI
 
 from cogram.core.config import Settings
 from cogram.llm_client.engram import Policy, put as cache_put, _hash
+from cogram.llm_client.structured import NodeNarrative, make_structured_client
 from cogram.utils.rate_limit import acquire as _rate_acquire
 
 
@@ -244,18 +244,26 @@ async def narrate(
             narr["_prompt"] = prompt
             return narr
 
-    # T1: cached prompt-orchestration call
-    client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
+    # T1: cached prompt-orchestration call. Narration is a small-tier call
+    # (single-entity summary, ~600 tokens out, fired per hub node).
+    # instructor enforces NodeNarrative as the response shape; the brain
+    # serializes the validated model so the Policy cache stores a stable
+    # JSON string and _parse_narrative continues to work for both T1 and T2.
+    client = make_structured_client(
+        api_key=settings.small_llm_api_key,
+        base_url=settings.small_llm_base_url,
+    )
 
     async def brain(p: str) -> str:
-        await _rate_acquire()
-        resp = await client.chat.completions.create(
-            model=settings.graphiti_llm_model,
+        await _rate_acquire(group_id)
+        narrative: NodeNarrative = await client.chat.completions.create(
+            model=settings.small_llm_model,
             messages=[{"role": "user", "content": p}],
+            response_model=NodeNarrative,
             temperature=0.5,
             max_tokens=800,
         )
-        return (resp.choices[0].message.content or "").strip()
+        return narrative.model_dump_json()
 
     policy = Policy(
         name="node_narration",

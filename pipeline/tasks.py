@@ -6,10 +6,9 @@ distill, knot synthesis) runs in the background. Without observability hooks,
 clients can't tell whether the background work finished, is still running, or
 crashed.
 
-This module provides a process-local registry so the four task-management MCP
-tools (`list_add_memory_tasks`, `get_add_memory_task_status`,
-`wait_for_add_memory_task`, `cancel_add_memory_task`) can introspect and
-control those background tasks.
+This module provides a process-local registry so the three task-management MCP
+tools (`list_episode_tasks`, `get_episode_task`, `cancel_episode_task`) can
+introspect and control those background tasks.
 
 Scope:
   - In-memory only. Restarting the MCP server clears the registry.

@@ -18,43 +18,133 @@ load_dotenv()
 
 @dataclass
 class Settings:
-    api_key: str
-    base_url: str
-    graphiti_llm_model: str
-    annotator_llm_model: str
-    embedding_model: str
+    """Cogram runtime settings.
+
+    Three LLM tiers are addressable independently so users can route the
+    expensive extraction call to OpenAI/Anthropic and the cheaper post-write
+    calls to DeepSeek/Qwen/Ollama:
+
+      large_llm_*  — graphiti's entity/edge extraction (heavy multi-shot call)
+      small_llm_*  — intent annotation, narration, profile distill, contradiction
+                     classifier (cheap structured-output calls, fired in pipeline)
+      embedder_*   — text-embedding for entities, episodes, edges, narratives
+
+    For backward compat with v0.1 .env files:
+      GRAPHITI_LLM_MODEL   falls into large_llm_model when LARGE_LLM_MODEL unset
+      ANNOTATOR_LLM_MODEL  falls into small_llm_model when SMALL_LLM_MODEL unset
+      EMBEDDING_MODEL      falls into embedder_model  when EMBEDDER_MODEL  unset
+      OPENAI_API_KEY / LLM_BASE_URL  serve as the default for any tier whose
+      LARGE_/SMALL_/EMBEDDER_ specific key/url is unset.
+
+    The legacy attributes `api_key`, `base_url`, `graphiti_llm_model`,
+    `annotator_llm_model`, `embedding_model` are preserved as aliases that
+    point at the matching tiered field, so older code keeps working.
+    """
+    # Tiered model names
+    large_llm_model: str
+    small_llm_model: str
+    embedder_model: str
     embedding_dim: int
+
+    # Tiered endpoints
+    large_llm_api_key: str
+    large_llm_base_url: str
+    small_llm_api_key: str
+    small_llm_base_url: str
+    embedder_api_key: str
+    embedder_base_url: str
+
+    # Cluster/global config
     rate_limit_per_min: int
     neo4j_uri: str
     neo4j_user: str
     neo4j_password: str
 
+    # ------------------------------------------------------------------
+    # Backward-compat aliases (read-only; old call sites keep working)
+    # ------------------------------------------------------------------
+
+    @property
+    def api_key(self) -> str:
+        """Legacy alias: defaults to the small-tier key (most call sites
+        historically used this for annotator/narrator/profile)."""
+        return self.small_llm_api_key
+
+    @property
+    def base_url(self) -> str:
+        """Legacy alias: defaults to the small-tier endpoint."""
+        return self.small_llm_base_url
+
+    @property
+    def graphiti_llm_model(self) -> str:
+        """Legacy alias for the large-tier model (graphiti extraction)."""
+        return self.large_llm_model
+
+    @property
+    def annotator_llm_model(self) -> str:
+        """Legacy alias for the small-tier model (annotation/narration/profile)."""
+        return self.small_llm_model
+
+    @property
+    def embedding_model(self) -> str:
+        """Legacy alias for embedder_model."""
+        return self.embedder_model
+
     @classmethod
     def from_env(cls) -> "Settings":
-        # Provider-agnostic key lookup; first non-empty wins
-        key = (
+        # ------------------------------------------------------------------
+        # Default key + base_url (used when a tier doesn't set its own)
+        # ------------------------------------------------------------------
+        default_key = (
             os.environ.get("OPENAI_API_KEY", "").strip()
             or os.environ.get("NVIDIA_API_KEY", "").strip()
             or os.environ.get("LLM_API_KEY", "").strip()
         )
-        if not key or "replace" in key:
+        if not default_key or "replace" in default_key:
             raise SystemExit("Set OPENAI_API_KEY (or NVIDIA_API_KEY) in .env")
 
-        # Default to OpenAI; override with NVIDIA_BASE_URL or LLM_BASE_URL for NIM/etc.
-        base_url = (
+        default_base = (
             os.environ.get("LLM_BASE_URL")
             or os.environ.get("OPENAI_BASE_URL")
             or os.environ.get("NVIDIA_BASE_URL")
             or "https://api.openai.com/v1"
         )
 
+        # ------------------------------------------------------------------
+        # Tiered model names — new env wins; old env is fallback
+        # ------------------------------------------------------------------
+        large_model = (
+            os.environ.get("LARGE_LLM_MODEL")
+            or os.environ.get("GRAPHITI_LLM_MODEL")
+            or "gpt-4o-mini"
+        )
+        small_model = (
+            os.environ.get("SMALL_LLM_MODEL")
+            or os.environ.get("ANNOTATOR_LLM_MODEL")
+            or "gpt-4o-mini"
+        )
+        embedder_model = (
+            os.environ.get("EMBEDDER_MODEL")
+            or os.environ.get("EMBEDDING_MODEL")
+            or "text-embedding-3-small"
+        )
+
+        # ------------------------------------------------------------------
+        # Tiered endpoints — fall back to the shared default key/base_url
+        # ------------------------------------------------------------------
         return cls(
-            api_key=key,
-            base_url=base_url,
-            graphiti_llm_model=os.environ.get("GRAPHITI_LLM_MODEL", "gpt-4o-mini"),
-            annotator_llm_model=os.environ.get("ANNOTATOR_LLM_MODEL", "gpt-4o-mini"),
-            embedding_model=os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small"),
+            large_llm_model=large_model,
+            small_llm_model=small_model,
+            embedder_model=embedder_model,
             embedding_dim=int(os.environ.get("EMBEDDING_DIM", "1536")),
+
+            large_llm_api_key=os.environ.get("LARGE_LLM_API_KEY", "").strip() or default_key,
+            large_llm_base_url=os.environ.get("LARGE_LLM_BASE_URL", "").strip() or default_base,
+            small_llm_api_key=os.environ.get("SMALL_LLM_API_KEY", "").strip() or default_key,
+            small_llm_base_url=os.environ.get("SMALL_LLM_BASE_URL", "").strip() or default_base,
+            embedder_api_key=os.environ.get("EMBEDDER_API_KEY", "").strip() or default_key,
+            embedder_base_url=os.environ.get("EMBEDDER_BASE_URL", "").strip() or default_base,
+
             rate_limit_per_min=int(os.environ.get("RATE_LIMIT_PER_MIN", "150")),
             neo4j_uri=os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
             neo4j_user=os.environ.get("NEO4J_USER", "neo4j"),
@@ -65,30 +155,33 @@ class Settings:
 def build_graphiti(settings: Settings | None = None) -> Graphiti:
     s = settings or Settings.from_env()
 
+    # Graphiti's extraction is the heavy LLM call → routed to LARGE tier.
+    # `small_model` is graphiti's secondary model field (used for cheaper
+    # validation / dedup helpers); we route that to our SMALL tier.
     llm_client = OpenAIGenericClient(
         config=LLMConfig(
-            api_key=s.api_key,
-            model=s.graphiti_llm_model,
-            small_model=s.graphiti_llm_model,
-            base_url=s.base_url,
+            api_key=s.large_llm_api_key,
+            model=s.large_llm_model,
+            small_model=s.small_llm_model,
+            base_url=s.large_llm_base_url,
         )
     )
 
     embedder = OpenAIEmbedder(
         config=OpenAIEmbedderConfig(
-            api_key=s.api_key,
-            embedding_model=s.embedding_model,
+            api_key=s.embedder_api_key,
+            embedding_model=s.embedder_model,
             embedding_dim=s.embedding_dim,
-            base_url=s.base_url,
+            base_url=s.embedder_base_url,
         )
     )
 
     cross_encoder = OpenAIRerankerClient(
         config=LLMConfig(
-            api_key=s.api_key,
-            model=s.graphiti_llm_model,
-            small_model=s.graphiti_llm_model,
-            base_url=s.base_url,
+            api_key=s.large_llm_api_key,
+            model=s.large_llm_model,
+            small_model=s.small_llm_model,
+            base_url=s.large_llm_base_url,
         )
     )
 

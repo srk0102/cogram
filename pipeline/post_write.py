@@ -79,10 +79,10 @@ class PipelineSummary:
 # ---------------------------------------------------------------------------
 
 async def _step_annotate(
-    graphiti, episode_uuid: str, settings: Settings, summary: PipelineSummary
+    graphiti, episode_uuid: str, group_id: str, settings: Settings, summary: PipelineSummary
 ) -> None:
     try:
-        count = await annotate_edges_for_episode(graphiti, episode_uuid, settings)
+        count = await annotate_edges_for_episode(graphiti, episode_uuid, settings, group_id=group_id)
         summary.edges_annotated = count
     except Exception as exc:
         summary.skipped.append(f"annotate: {exc}")
@@ -180,32 +180,34 @@ async def _collect_annotated_edges_for_group(graphiti, group_id: str) -> list[di
     return edges_data
 
 
-async def _llm_distill_profile(edges_data: list[dict], settings: Settings) -> dict:
-    from openai import AsyncOpenAI
+async def _llm_distill_profile(
+    edges_data: list[dict], settings: Settings, group_id: str = "default"
+) -> dict:
+    from cogram.llm_client.structured import (
+        DirectorProfileCompression,
+        make_structured_client,
+    )
 
-    client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
-    await _rate_acquire()
-    resp = await client.chat.completions.create(
-        model=settings.annotator_llm_model,
+    # Profile compression is a small-tier call. instructor enforces the
+    # DirectorProfileCompression shape and auto-retries on parse failure.
+    client = make_structured_client(
+        api_key=settings.small_llm_api_key,
+        base_url=settings.small_llm_base_url,
+    )
+    await _rate_acquire(group_id)
+    profile: DirectorProfileCompression = await client.chat.completions.create(
+        model=settings.small_llm_model,
         messages=[{"role": "user", "content": COMPRESSION_PROMPT.format(
             edges=json.dumps([
                 {k: v for k, v in e.items() if k not in ("a_uuid", "b_uuid", "group_id")}
                 for e in edges_data
             ], indent=2),
         )}],
+        response_model=DirectorProfileCompression,
         temperature=0.5,
         max_tokens=4096,
     )
-    msg = resp.choices[0].message
-    text = ((msg.content or "") or (getattr(msg, "reasoning_content", None) or "")).strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        return {"working_style_summary": "", "recurring_visions": [], "cognitive_patterns": []}
-    return json.loads(text[start : end + 1])
+    return profile.model_dump()
 
 
 async def _step_profile(
@@ -224,7 +226,7 @@ async def _step_profile(
         if not edges_data:
             return
 
-        profile = await _llm_distill_profile(edges_data, settings)
+        profile = await _llm_distill_profile(edges_data, settings, group_id=group_id)
         counts = await upsert_profile_to_graph(graphiti, profile, edges_data, group_id)
         summary.profile_distilled = True
         summary.profile_patterns = counts.get("patterns", 0)
@@ -270,7 +272,7 @@ async def cogram_post_write(
         node_uuids = [u for u in node_uuids if u]
 
         if episode_uuid:
-            await _step_annotate(graphiti, episode_uuid, settings, summary)
+            await _step_annotate(graphiti, episode_uuid, group_id, settings, summary)
         await _step_narrate(graphiti, node_uuids, group_id, settings, summary)
         await _step_profile(graphiti, group_id, settings, summary)
 

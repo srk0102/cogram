@@ -140,6 +140,33 @@ COGRAM_RESYNTHESIS_RATE_CAP_PER_HOUR=5      # per-group fire rate cap
 
 These make worst-case daily cost provably bounded.
 
+## Rate limiting (dual-gate, v0.2+)
+
+Every LLM and embedder call passes through two sliding-window gates in
+[utils/rate_limit.py](../utils/rate_limit.py):
+
+| Gate | Default | Purpose |
+|---|---|---|
+| **Global** | `RATE_LIMIT_PER_MIN=150` | Stays under upstream provider's per-minute quota (OpenAI tier 1, NIM, etc.) |
+| **Per-group** | `RATE_LIMIT_PER_GROUP_PER_MIN=50` | Prevents one busy `group_id` from monopolizing the global pool |
+
+`acquire(group_id)` blocks while EITHER gate is full. The default
+`group_id="default"` keeps zero-arg callers working — they share one
+"default" bucket, which is fine for single-tenant deployments.
+
+Per-group fairness applies to the post-write maintenance modules
+(intent annotation, narration, profile distillation) since they have
+the group_id in scope. Graphiti's extraction call and the contradiction
+classifier currently share the "default" bucket because their wrappers
+don't surface group_id.
+
+To disable per-group fairness (rely on global cap only), set
+`RATE_LIMIT_PER_GROUP_PER_MIN=0`.
+
+The per-group history dict opportunistically purges idle groups
+(no acquire in the last 60s) when it grows past 32 entries, so workloads
+with many short-lived group_ids don't leak memory.
+
 ## Backward compatibility
 
 - `Graphiti = Cogram` aliased at module level — `from cogram import Graphiti` keeps working

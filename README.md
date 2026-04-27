@@ -338,9 +338,52 @@ cogram = Cogram(graph_driver=driver)
 
 ## Using Cogram with different LLM providers
 
+Cogram exposes three independently-configurable LLM tiers — pick the model and endpoint for each one separately. Full reference: [docs/llm_calls.md](docs/llm_calls.md).
+
+| Tier | What it powers | Default | Tunable env vars |
+|---|---|---|---|
+| **LARGE** | Graphiti's entity/edge extraction (heavy multi-shot call) | `gpt-4o-mini` | `LARGE_LLM_MODEL`, `LARGE_LLM_API_KEY`, `LARGE_LLM_BASE_URL` |
+| **SMALL** | Intent annotation, node narration, profile distillation, contradiction classifier | `gpt-4o-mini` | `SMALL_LLM_MODEL`, `SMALL_LLM_API_KEY`, `SMALL_LLM_BASE_URL` |
+| **EMBEDDER** | Embeddings (entities, edges, episodes, narratives) | `text-embedding-3-small` | `EMBEDDER_MODEL`, `EMBEDDER_API_KEY`, `EMBEDDER_BASE_URL` |
+
+Each tier falls back to `OPENAI_API_KEY` + `OPENAI_BASE_URL` when its own key/url is unset, so single-provider setups stay one-line.
+
 ### OpenAI (default)
 
-Set `OPENAI_API_KEY` in `.env`. Cogram defaults to `gpt-4o-mini` for extraction, intent annotation, narration, and profile distillation.
+Set `OPENAI_API_KEY` in `.env`. Defaults to `gpt-4o-mini` everywhere. No other config needed.
+
+### Cost-optimized: extraction on OpenAI, pipeline on DeepSeek
+
+```env
+LARGE_LLM_MODEL=gpt-4o
+LARGE_LLM_API_KEY=sk-openai-...
+
+SMALL_LLM_MODEL=deepseek-chat
+SMALL_LLM_API_KEY=sk-deepseek-...
+SMALL_LLM_BASE_URL=https://api.deepseek.com/v1
+
+EMBEDDER_MODEL=text-embedding-3-small
+EMBEDDER_API_KEY=sk-openai-...
+```
+
+Cuts post-write pipeline cost by ~10× while preserving extraction quality.
+
+### Fully local: Ollama for everything
+
+```env
+SMALL_LLM_MODEL=qwen2.5:7b
+SMALL_LLM_API_KEY=ollama
+SMALL_LLM_BASE_URL=http://host.docker.internal:11434/v1
+
+LARGE_LLM_MODEL=qwen2.5:14b
+LARGE_LLM_API_KEY=ollama
+LARGE_LLM_BASE_URL=http://host.docker.internal:11434/v1
+
+GEMMA_BASE_URL=http://host.docker.internal:11434/v1
+GEMMA_MODEL=gemma3n:e4b
+```
+
+Embeddings still need a remote provider — Ollama embedding models work but are noticeably weaker for graph search. Most users keep `EMBEDDER_*` on OpenAI.
 
 ### Local Gemma via Ollama (recommended for knot synthesis)
 
@@ -348,13 +391,33 @@ Set `OPENAI_API_KEY` in `.env`. Cogram defaults to `gpt-4o-mini` for extraction,
 ollama pull gemma3n:e4b
 ```
 
-In `.env`:
-```bash
+```env
 GEMMA_BASE_URL=http://host.docker.internal:11434/v1
 GEMMA_MODEL=gemma3n:e4b
 ```
 
-Cogram uses Gemma for hub narrative synthesis only. All other LLM calls stay on OpenAI for structured-output reliability. Falls back to `gpt-4o-mini` if Ollama unreachable.
+Cogram uses Gemma for hub narrative synthesis only. Falls back to `gpt-4o-mini` if Ollama unreachable.
+
+### Anthropic / Gemini / Groq via custom client
+
+Cogram inherits Graphiti's multi-provider support. Set the appropriate API key and pass an alternate `LLMClient` to the `Cogram` constructor:
+
+```python
+from cogram import Cogram
+from cogram.llm_client.anthropic_client import AnthropicClient, LLMConfig
+
+cogram = Cogram(
+    "bolt://localhost:7687", "neo4j", "password",
+    llm_client=AnthropicClient(config=LLMConfig(
+        api_key="<your-anthropic-key>",
+        model="claude-sonnet-4-5-latest",
+    )),
+)
+```
+
+> **Backward compat**
+>
+> v0.1 env vars (`GRAPHITI_LLM_MODEL`, `ANNOTATOR_LLM_MODEL`, `EMBEDDING_MODEL`) still work as fallbacks for the new tiered names. Existing `.env` files keep working unchanged.
 
 ### Anthropic / Gemini / Groq
 
@@ -449,7 +512,7 @@ For deep architectural details — the five LLM call types, the three storage ti
 - Async pipeline fires on every `add_episode` (~3s MCP latency, ~15s background)
 - Engram cache + Redis active subgraph wired and active
 - Knot detection + Gemma synthesis with `gpt-4o-mini` fallback
-- 20 MCP tools functional (16 graph tools + 4 task management tools)
+- 19 MCP tools functional (16 graph tools + 3 episode-task tools)
 - Public Docker images on ghcr.io, anonymous pull works
 
 **Known limitations:**
@@ -459,7 +522,7 @@ For deep architectural details — the five LLM call types, the three storage ti
 
 **Shipped in v0.2:**
 - `edge_kind` field in `intent_meta` (`principle` / `action` / `context` / `competitor` / `unknown`) — see [docs/annotator_flaw.md](docs/annotator_flaw.md)
-- Background pipeline task registry + 4 new MCP tools: `list_add_memory_tasks`, `get_add_memory_task_status`, `wait_for_add_memory_task`, `cancel_add_memory_task`
+- Background pipeline task registry + 3 new MCP tools: `list_episode_tasks`, `get_episode_task(task_id, wait_seconds=0)`, `cancel_episode_task`
 
 **Roadmap (v0.3+):**
 - Opt-in MCP tool to backfill `edge_kind` on legacy edges with a before/after diff of cognitive patterns

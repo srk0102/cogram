@@ -911,8 +911,8 @@ async def add_episode(content: str, source_description: str = "claude-mcp", grou
                     "task_id": task_id,
                     "note": (
                         "intent_meta/narrative/profile will populate within ~15s. "
-                        "Poll get_add_memory_task_status(task_id) or block on "
-                        "wait_for_add_memory_task(task_id). Subscribe to "
+                        "Peek with get_episode_task(task_id) or block with "
+                        "get_episode_task(task_id, wait_seconds=20). Subscribe to "
                         "cogram:events:pipeline_done for the same signal via Redis."
                     ),
                 }
@@ -939,12 +939,14 @@ async def record_fact(subject: str, predicate: str, object: str, group_id: str =
 # When add_episode runs in async mode (the default), the cogram post-write
 # pipeline (annotation / narration / profile / knot synthesis) runs in the
 # background and the task_id is returned in the add_episode response.
-# These four tools let an MCP client introspect and control those tasks
-# without subscribing to the Redis events channel.
+# These three tools let an MCP client introspect and control those tasks
+# without subscribing to the Redis events channel. The naming follows
+# cogram's own vocabulary (`episode`, not `memory`) so the tool surface is
+# consistent with add_episode.
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def list_add_memory_tasks(
+async def list_episode_tasks(
     group_id: str = "",
     state: str = "",
     limit: int = 50,
@@ -976,51 +978,51 @@ async def list_add_memory_tasks(
 
 
 @mcp.tool()
-async def get_add_memory_task_status(task_id: str) -> str:
-    """Return the current state + summary of a background pipeline task.
+async def get_episode_task(task_id: str, wait_seconds: float = 0.0) -> str:
+    """Inspect (and optionally wait for) a background pipeline task spawned
+    by add_episode.
 
-    States:
+    States returned in the `state` field:
       running   — pipeline still working
-      done      — finished; full summary available (edges_annotated,
+      done      — finished; full `summary` populated (edges_annotated,
                   nodes_narrated, profile_distilled, knot_synthesis, ...)
-      failed    — exception; see `error` field
-      cancelled — cancelled via cancel_add_memory_task
+      failed    — exception during pipeline; see `error` field
+      cancelled — cancelled via cancel_episode_task
+
+    `wait_seconds` controls behavior:
+      0   — peek only; return current state immediately (default)
+      N   — block up to N seconds for the task to reach a terminal state,
+            then return whatever state we're in (still 'running' on timeout)
+
+    Typical use: an agent calls add_episode, gets task_id, then calls
+    get_episode_task(task_id, wait_seconds=20) before reading the graph so
+    the post-write annotations have settled.
 
     Returns ok=False if the task_id is unknown (registry was cleared, or
     record was evicted past COGRAM_TASK_HISTORY)."""
     from cogram.pipeline import tasks as _tasks
-    rec = _tasks.get(task_id)
-    if rec is None:
-        return json.dumps(
-            {"ok": False, "error": f"unknown task_id {task_id!r}"},
-            indent=2,
-        )
+
+    if wait_seconds and wait_seconds > 0:
+        try:
+            rec = await _tasks.wait(task_id, timeout=wait_seconds)
+        except KeyError:
+            return json.dumps(
+                {"ok": False, "error": f"unknown task_id {task_id!r}"},
+                indent=2,
+            )
+    else:
+        rec = _tasks.get(task_id)
+        if rec is None:
+            return json.dumps(
+                {"ok": False, "error": f"unknown task_id {task_id!r}"},
+                indent=2,
+            )
+
     return json.dumps({"ok": True, **rec.to_dict()}, indent=2, default=str)
 
 
 @mcp.tool()
-async def wait_for_add_memory_task(task_id: str, timeout_seconds: float = 30.0) -> str:
-    """Block until the named pipeline task finishes (done / failed / cancelled),
-    or `timeout_seconds` elapses. Returns the same shape as
-    get_add_memory_task_status; the `state` field tells you whether the task
-    finished or the wait timed out.
-
-    Typical use: an agent calls add_episode and then immediately asks the graph
-    a question that depends on the post-write annotations. Block on the task_id
-    first to avoid a stale read."""
-    from cogram.pipeline import tasks as _tasks
-    try:
-        rec = await _tasks.wait(task_id, timeout=timeout_seconds)
-    except KeyError:
-        return json.dumps(
-            {"ok": False, "error": f"unknown task_id {task_id!r}"},
-            indent=2,
-        )
-    return json.dumps({"ok": True, **rec.to_dict()}, indent=2, default=str)
-
-
-@mcp.tool()
-async def cancel_add_memory_task(task_id: str) -> str:
+async def cancel_episode_task(task_id: str) -> str:
     """Request cancellation of a still-running pipeline task. Returns
     ok=True if a running task was cancelled, ok=False if the task was
     already terminal or unknown.
