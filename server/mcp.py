@@ -23,7 +23,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from cogram.core.config import build_graphiti, Settings
-from cogram.utils.confidence import effective_confidence, label_for, normalized_confidence
+from cogram.utils.confidence import effective_confidence, label_for
 
 PROFILE_PATH = Path(__file__).resolve().parent.parent / "director_profile.json"
 
@@ -88,52 +88,13 @@ def _profile_cache_key(group_id: str, top_patterns: int, examples_per_pattern: i
     return f"cogram:cache:profile:{group_id}:top{top_patterns}:ex{examples_per_pattern}"
 
 
-@mcp.tool()
-async def get_knot(entity_name: str, format: str = "both") -> str:
-    """Return the pre-synthesized 'knot' narrative + raw subgraph for a hub entity.
-
-    Cogram pre-synthesizes one narrative paragraph per qualifying hub node (degree
-    >= 5, knot_score >= threshold) using Gemma 3 4B local (or gpt-4o-mini fallback)
-    and caches BOTH forms in Redis:
-      - narrative: a 3-5 sentence paragraph an LLM agent can drop into context
-      - subgraph: raw entities + edges + intent_meta as JSON
-
-    `format` selects which to return: 'narrative' | 'subgraph' | 'both'.
-
-    If the entity isn't a knot yet (low degree or under threshold), returns
-    a hint to use search_graph or find_connections instead.
-    """
-    g = _g()
-    cypher = """
-    MATCH (n:Entity)
-    WHERE toLower(n.name) CONTAINS toLower($q)
-    RETURN n.uuid AS uuid, n.name AS name LIMIT 1
-    """
-    async with g.driver.session() as session:
-        rec = await (await session.run(cypher, q=entity_name)).single()
-    if rec is None:
-        return json.dumps({"ok": False, "error": f"No entity matches {entity_name!r}."}, indent=2)
-
-    try:
-        from cogram.utils.maintenance.knot_synthesis import get_knot as _get_knot
-        knot = await _get_knot(rec["uuid"])
-    except Exception as exc:
-        return json.dumps({"ok": False, "error": f"knots module error: {exc}"}, indent=2)
-
-    if not knot or (not knot.get("narrative") and not knot.get("subgraph")):
-        return json.dumps({
-            "ok": False,
-            "entity": rec["name"],
-            "uuid": rec["uuid"],
-            "hint": "This entity isn't a synthesized knot yet (likely low degree or below score threshold). Try search_graph or find_connections.",
-        }, indent=2)
-
-    out = {"ok": True, "entity": rec["name"], "uuid": rec["uuid"], "meta": knot.get("meta")}
-    if format in ("narrative", "both"):
-        out["narrative"] = knot.get("narrative")
-    if format in ("subgraph", "both"):
-        out["subgraph"] = knot.get("subgraph")
-    return json.dumps(out, indent=2, default=str)
+# NOTE: `get_knot` was removed from the MCP surface in v0.2.1.
+# Until knot synthesis runs reliably (the 120s pipeline timeout currently
+# squeezes it on bigger writes), agents that called get_knot first to "see
+# what's in there" got an empty hint back ~95% of the time and had to retry
+# with get_node_narrative. The underlying machinery still lives in
+# cogram.utils.maintenance.knot_synthesis (and is used by the post-write
+# pipeline). It will be re-exposed once synthesis is reliable.
 
 
 @mcp.tool()
@@ -142,18 +103,10 @@ async def get_director_profile(
     top_patterns: int = 10,
     examples_per_pattern: int = 2,
 ) -> str:
-    """Return the compressed Director profile: cognitive patterns, recurring
-    visions, and a working-style summary distilled from every annotated edge in
-    the graph.
-
-    Each cognitive pattern is returned with `examples` — concrete (entity → entity)
-    edges with their `why_connected` and `director_vision` annotations that
-    actually reinforced this pattern. This is the **why** behind each label.
-
-    By default returns the top 10 patterns by confidence; pass top_patterns=N to
-    expand. Result is cached in Redis for 5 minutes; cache is invalidated on
-    profile_change events (new ingestion, retraction). Single Cypher query
-    (no 1+N round-trips even with many patterns).
+    """Compressed Director profile for ONE group: working-style summary + recurring visions + top cognitive patterns with reinforcing-edge examples.
+    When: after list_groups picks a group_id and you want the user's reasoning model for it.
+    Inputs: group_id (required — get from list_groups), top_patterns, examples_per_pattern.
+    Pair with: edges_by_pattern(name) to drill into any pattern; for cross-group merge use get_unified_profile.
     """
     # ---- Redis cache check (assembled JSON) ----
     cache_key = _profile_cache_key(group_id, top_patterns, examples_per_pattern)
@@ -391,17 +344,10 @@ async def _traverse_profile(g) -> dict | None:
 
 @mcp.tool()
 async def search_graph(query: str, limit: int = 10, group_id: str = "default") -> str:
-    """Semantic search across the knowledge graph.
-
-    Profile-aware: if the query is subjective ('would I...', 'how do I feel...'),
-    Cypher-traverses (:DirectorProfile)-[:HAS_PATTERN]->(:CognitivePattern)-
-    [:REINFORCED_BY]->(:Entity) to surface the user's stance + reinforcing
-    edges with confidence-decay weighting.
-
-    Hot-tier accelerated: per-group_id active subgraph is cached in Redis. The
-    first call pulls the relevant subgraph from Neo4j into Redis (~50ms one-time);
-    subsequent searches within the same group_id check the in-memory subgraph
-    first (<1ms hits). Cold tier (Neo4j vector search) always runs as fallback.
+    """Semantic search across all edges. Profile-aware on subjective queries ('would I...', 'how do I feel...'). Hot-tier (Redis) accelerated — <1ms after first warm. Filters retracted edges automatically.
+    When: fuzzy concept lookup or 'find anything related to X'.
+    Inputs: query (any text), group_id (required — list_groups first), limit.
+    Pair with: find_connections when you have a known entity name. Pair with get_director_profile when query is subjective.
     """
     g = _g()
     response: dict = {}
@@ -522,9 +468,11 @@ async def search_graph(query: str, limit: int = 10, group_id: str = "default") -
 
 @mcp.tool()
 async def find_connections(entity_name: str, limit: int = 25) -> str:
-    """Return all edges connected to an entity by name (case-insensitive
-    substring match). Useful for 'show me everything connected to Graphiti'
-    or 'what does the Director say about Kimi K2'."""
+    """List every edge connected to one entity by name (case-insensitive substring). Includes intent_meta + retract status — raw edge dump.
+    When: known entity name, want all directly-attached facts. Audit/fallback when narratives feel stale.
+    Inputs: entity_name (substring), limit.
+    Pair with: get_node_narrative for the compressed view; this for raw edges.
+    """
     g = _g()
     cypher = """
     MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)
@@ -547,23 +495,10 @@ async def find_connections(entity_name: str, limit: int = 25) -> str:
 
 @mcp.tool()
 async def list_groups(query: str = "", limit: int = 20, offset: int = 0) -> str:
-    """List group_ids in the graph with episode/entity/pattern/knot counts.
-
-    Args:
-      query:  optional substring filter on group_id (case-insensitive).
-              e.g. query='cogram' matches 'cogram-knowledge' and 'cogram-test'.
-              Empty string returns all (default).
-      limit:  max number of groups to return (default 20, max 200).
-      offset: skip the first N matches for pagination (default 0).
-
-    Use at session start to discover what projects / contexts the user has
-    memory for, then route subsequent queries to the right group_id. The
-    query parameter is the cheap way to find a specific group when the user
-    has many — don't pull the entire list if you only want the cogram-* ones.
-
-    Returns paginated results with `total` (matched groups) and `returned`
-    (groups in this page). If `total > offset + returned`, call again with
-    a higher offset to get the next page.
+    """**First call of any session.** Returns each group_id with episode/entity/pattern/knot counts so you know what contexts exist before searching. Paginated.
+    When: at session start, or before ANY group-scoped tool call (search_graph, get_director_profile, edges_by_pattern).
+    Inputs: query (substring filter, case-insensitive), limit (max 200), offset.
+    Pair with: get_director_profile(group_id=X) once you've picked a group.
     """
     g = _g()
     limit = max(1, min(int(limit or 20), 200))
@@ -622,17 +557,10 @@ async def list_groups(query: str = "", limit: int = 20, offset: int = 0) -> str:
 
 @mcp.tool()
 async def list_cognitive_patterns(query: str = "", limit: int = 20, offset: int = 0) -> str:
-    """List distinct cognitive_pattern labels with edge counts.
-
-    Args:
-      query:  optional substring filter on pattern name (case-insensitive).
-              e.g. query='legal' matches 'legal risk mitigation' and
-              'legal compliance focus'. Empty returns all (default).
-      limit:  max patterns returned (default 20, max 200).
-      offset: skip first N matches for pagination.
-
-    Patterns are sorted by edge_count DESC (most-reinforced first), so
-    limit=10 with empty query returns the user's top 10 thinking styles.
+    """Discover distinct cognitive_pattern labels with edge counts. Sorted most-reinforced-first.
+    When: agent wants to know what thinking styles exist before drilling into one.
+    Inputs: query (substring filter, e.g. 'legal'), limit (max 200), offset.
+    Pair with: edges_by_pattern(pattern_name) for the actual evidence behind each pattern.
     """
     g = _g()
     limit = max(1, min(int(limit or 20), 200))
@@ -674,7 +602,11 @@ async def list_cognitive_patterns(query: str = "", limit: int = 20, offset: int 
 
 @mcp.tool()
 async def edges_by_pattern(pattern: str, limit: int = 25) -> str:
-    """Return edges whose cognitive_pattern matches (case-insensitive substring)."""
+    """**Cross-decision routing primitive.** Every edge whose cognitive_pattern matches, with intent_meta + director_vision intact. Substring match.
+    When: about to make a constrained decision — query the pattern name to surface every prior decision the user made under the same thinking style. Turns 'user rejected X once' into 'user has a recurring rule'.
+    Inputs: pattern (substring — see list_cognitive_patterns for exact names), limit.
+    Pair with: list_cognitive_patterns first to discover names.
+    """
     g = _g()
     cypher = """
     MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)
@@ -702,10 +634,11 @@ async def edges_by_pattern(pattern: str, limit: int = 25) -> str:
 
 @mcp.tool()
 async def get_node_narrative(entity_name: str) -> str:
-    """Return the vLLM-generated narrative for a node by name (case-insensitive
-    substring match). The narrative is the entity's perspective: stance,
-    open questions, cognitive pattern label. If no narrative has been generated
-    yet for this node, returns a placeholder."""
+    """**Primary 'what is X' tool.** 2-4 sentence narrative per matching entity, with stance, open_questions, cognitive_pattern_label, and confidence-decay. Up to 5 hits (substring match).
+    When: agent wants the compressed view of an entity before deeper retrieval.
+    Inputs: entity_name (substring).
+    Pair with: find_connections for raw edges; recent_episodes for what was just said about it.
+    """
     g = _g()
     cypher = """
     MATCH (n:Entity)
@@ -742,8 +675,11 @@ async def get_node_narrative(entity_name: str) -> str:
 
 @mcp.tool()
 async def recent_episodes(entity_name: str, n: int = 5) -> str:
-    """Return the n most recent episodic events that mention this entity.
-    Useful for 'what was I just talking about regarding X'."""
+    """Most recent N episodic events that mention this entity. Returns episode uuid + content excerpt + timestamp.
+    When: 'what was the user just talking about regarding X' or to find episode uuids for retract.
+    Inputs: entity_name (substring), n (default 5).
+    Pair with: get_episode(uuid) for the full body of any episode in the result.
+    """
     g = _g()
     cypher = """
     MATCH (e:Episodic)-[:MENTIONS]->(n:Entity)
@@ -770,8 +706,11 @@ async def recent_episodes(entity_name: str, n: int = 5) -> str:
 
 @mcp.tool()
 async def get_episode(uuid: str) -> str:
-    """Return the full content of a single episode by uuid. Useful when an edge
-    cites an episode and the agent wants the raw context."""
+    """Full content of one episode by uuid.
+    When: drilling into episode bodies after an edge or recent_episodes returns a uuid.
+    Inputs: uuid (the EPISODIC uuid — NOT the friendly `episode_name` like 'mcp_<ts>' that add_episode returns).
+    Pair with: recent_episodes/find_connections to find uuids; retract(target=uuid) to roll back facts from this episode.
+    """
     g = _g()
     cypher = """
     MATCH (e:Episodic {uuid: $uuid})
@@ -840,26 +779,11 @@ async def _run_pipeline_background(
 
 @mcp.tool()
 async def add_episode(content: str, source_description: str = "claude-mcp", group_id: str = "default") -> str:
-    """Write a new episode (a piece of text) to the graph. Graphiti will extract
-    entities + relationships + intent annotations from it.
-
-    Use this to actively record facts during a conversation:
-      - 'Candidate X has 5 years of React experience'
-      - 'Director's stance: never approve unjustified deps'
-      - any chunk of text Claude wants to commit to long-term memory
-
-    Pipeline modes (controlled by COGRAM_PIPELINE_MODE env var):
-      - 'async' (default): graphiti.add_episode runs and returns. The cogram
-        post-write pipeline (intent annotation, narration, profile distill,
-        Redis cache invalidation) runs as a background task. MCP latency is
-        ~2-3s regardless of how many entities the episode produces.
-      - 'sync': pipeline runs inline before returning. Latency 15-30s but
-        the response includes the full pipeline summary.
-
-    Returns a summary of what was extracted (entity count, edge count). In sync
-    mode the response also includes the full pipeline summary; in async mode
-    the pipeline result is published to the 'cogram:events:pipeline_done'
-    Redis channel."""
+    """Write text to the graph — graphiti extracts entities/edges, cogram annotates async. Returns task_id (~3s); pipeline runs ~15s in background.
+    When: user states a new fact, decision, or context worth remembering.
+    Inputs: content (any text), group_id (use list_groups first to pick), source_description.
+    Pair with: get_episode_task(task_id, wait_seconds=20) BEFORE reading the graph to avoid stale reads. Use record_fact for clean SPO sentences. Returns `episode_name` (friendly slug) and `cogram.task_id` — for retract use `get_episode` to fetch the EPISODIC uuid, not episode_name.
+    """
     from datetime import datetime, timezone
     from cogram.core.nodes import EpisodeType
     g = _g()
@@ -924,8 +848,11 @@ async def add_episode(content: str, source_description: str = "claude-mcp", grou
 
 @mcp.tool()
 async def record_fact(subject: str, predicate: str, object: str, group_id: str = "default") -> str:
-    """Convenience wrapper around add_episode for stating a simple subject-predicate-object fact.
-    e.g. record_fact('Siva', 'building', 'AI HR platform')."""
+    """SPO wrapper around add_episode. Constructs '{subject} {predicate} {object}' and writes — locks edge structure better than free prose.
+    When: user states a structural fact ('Siva builds cogram', 'cogram uses Neo4j'). Use add_episode for narrative episodes.
+    Inputs: subject, predicate, object, group_id.
+    Pair with: get_episode_task(task_id, wait_seconds=20) — same async pipeline as add_episode.
+    """
     return await add_episode(
         content=f"{subject} {predicate} {object}",
         source_description="claude-fact",
@@ -951,16 +878,11 @@ async def list_episode_tasks(
     state: str = "",
     limit: int = 50,
 ) -> str:
-    """List in-flight and recently completed background pipeline tasks spawned
-    by add_episode (async mode). Newest first.
-
-    Filters:
-      group_id  — restrict to one group; empty = all groups
-      state     — 'running' | 'done' | 'failed' | 'cancelled' | '' (all)
-      limit     — max records to return (default 50)
-
-    The registry holds the most recent ~200 records process-wide; older finished
-    tasks are evicted in FIFO order. Restarting the MCP server clears it."""
+    """List in-flight + recent background pipeline tasks (newest first). Process-local — keeps last ~200; cleared on server restart.
+    When: introspecting whether a write's annotations have settled, or finding a task_id you lost.
+    Inputs: group_id (filter), state ('running'|'done'|'failed'|'cancelled'|''), limit.
+    Pair with: get_episode_task(task_id, wait_seconds=N) to wait/peek; cancel_episode_task to abort.
+    """
     from cogram.pipeline import tasks as _tasks
     items = _tasks.list_tasks(
         group_id=group_id or None,
@@ -979,27 +901,11 @@ async def list_episode_tasks(
 
 @mcp.tool()
 async def get_episode_task(task_id: str, wait_seconds: float = 0.0) -> str:
-    """Inspect (and optionally wait for) a background pipeline task spawned
-    by add_episode.
-
-    States returned in the `state` field:
-      running   — pipeline still working
-      done      — finished; full `summary` populated (edges_annotated,
-                  nodes_narrated, profile_distilled, knot_synthesis, ...)
-      failed    — exception during pipeline; see `error` field
-      cancelled — cancelled via cancel_episode_task
-
-    `wait_seconds` controls behavior:
-      0   — peek only; return current state immediately (default)
-      N   — block up to N seconds for the task to reach a terminal state,
-            then return whatever state we're in (still 'running' on timeout)
-
-    Typical use: an agent calls add_episode, gets task_id, then calls
-    get_episode_task(task_id, wait_seconds=20) before reading the graph so
-    the post-write annotations have settled.
-
-    Returns ok=False if the task_id is unknown (registry was cleared, or
-    record was evicted past COGRAM_TASK_HISTORY)."""
+    """Inspect or block on a background pipeline task. wait_seconds=0 peeks; wait_seconds=N blocks up to N seconds for terminal state. State ∈ running|done|failed|cancelled.
+    When: agent just called add_episode/record_fact and needs annotations settled before reading the graph (otherwise stale reads).
+    Inputs: task_id (returned by add_episode/record_fact in `cogram.task_id`), wait_seconds (default 0).
+    Pair with: cancel_episode_task to abort runaway tasks; list_episode_tasks to find lost task_ids.
+    """
     from cogram.pipeline import tasks as _tasks
 
     if wait_seconds and wait_seconds > 0:
@@ -1023,13 +929,11 @@ async def get_episode_task(task_id: str, wait_seconds: float = 0.0) -> str:
 
 @mcp.tool()
 async def cancel_episode_task(task_id: str) -> str:
-    """Request cancellation of a still-running pipeline task. Returns
-    ok=True if a running task was cancelled, ok=False if the task was
-    already terminal or unknown.
-
-    Cancellation is cooperative: the task hits its next `await` and aborts
-    with asyncio.CancelledError. Any annotations / narrations already
-    written to Neo4j stay; only future steps are skipped."""
+    """Cooperatively cancel a still-running pipeline task. Already-written annotations stay; only future steps are skipped.
+    When: a task is stuck, took the wrong direction, or rate-limit chains will block other writes.
+    Inputs: task_id.
+    Pair with: list_episode_tasks(state='running') to find live task_ids first.
+    """
     from cogram.pipeline import tasks as _tasks
     cancelled = _tasks.cancel(task_id)
     return json.dumps(
@@ -1047,16 +951,11 @@ async def cancel_episode_task(task_id: str) -> str:
 
 @mcp.tool()
 async def get_unified_profile(top_patterns: int = 15, examples_per_pattern: int = 1) -> str:
-    """Unified Director profile across ALL group_ids in the graph. Merges every
-    :DirectorProfile into one synthesized view: combined working-style summaries,
-    deduplicated visions, and cognitive patterns aggregated across groups
-    (confidence/count summed when the same pattern name appears in multiple groups).
-
-    Use this when the user has multiple group_ids (e.g. 'hr_platform',
-    'default', 'engram') and you want a single 'who is this person across all
-    their work' answer.
-
-    Single Cypher round-trip (no per-group fan-out)."""
+    """Director profile MERGED across every group_id with `appears_in_groups` per pattern. Single Cypher round-trip.
+    When: user has multiple groups and you want one 'who is this person across all their work' answer.
+    Inputs: top_patterns, examples_per_pattern. No group_id (merges all).
+    Pair with: get_director_profile(group_id=X) when you need one group in detail; list_groups to discover the groups.
+    """
     cache_key = f"cogram:cache:profile:UNIFIED:top{top_patterns}:ex{examples_per_pattern}"
     try:
         import redis.asyncio as _r
@@ -1162,39 +1061,20 @@ async def get_unified_profile(top_patterns: int = 15, examples_per_pattern: int 
     return payload
 
 
-@mcp.tool()
-async def dedup_patterns(group_id: str = "default", threshold: float = 0.88) -> str:
-    """Collapse near-duplicate cognitive_pattern names within a group.
-
-    The annotator emits slight variations ('integration-focused development',
-    'systematic integration', 'modular integration approach') that are really
-    one underlying idea. This tool embeds every pattern name and merges any
-    two whose cosine similarity is above `threshold` (default 0.88), folding
-    confidence + count + REINFORCED_BY edges + RELATES_TO.cognitive_pattern_name
-    pointers into the winner. Idempotent.
-
-    Returns a summary of merges performed."""
-    g = _g()
-    try:
-        from cogram.utils.maintenance.pattern_dedup import dedup_patterns as _dedup
-        result = await _dedup(g, group_id, _settings(), threshold=threshold)
-        return json.dumps(result, indent=2, default=str)
-    except Exception as exc:
-        return json.dumps({"ok": False, "error": str(exc)}, indent=2)
+# NOTE: `dedup_patterns` was removed from the MCP surface in v0.2.1.
+# Agents shouldn't trigger pattern dedup on a live graph during a chat — it
+# fires bulk embedding calls and merges names across in-flight conversations.
+# The function stays callable as a CLI / cron tool via:
+#   docker exec cogram-mcp python -m cogram.utils.maintenance.pattern_dedup
+# (or import it directly from cogram.utils.maintenance.pattern_dedup).
 
 
 @mcp.tool()
 async def retract(target: str, reason: str = "") -> str:
-    """Mark a fact in the graph as retracted (i.e. wrong / no longer believed).
-
-    `target` is either:
-      - an Episodic uuid (retracts every edge that came from that episode)
-      - an Entity name (retracts every RELATES_TO edge touching that entity)
-      - an edge uuid (retracts only that edge)
-
-    Retracted edges are kept on disk for audit, but are filtered out of
-    `search_graph` results. Use this when the user says 'that's wrong',
-    'I never said that', or corrects a specific fact.
+    """Mark fact(s) as no-longer-believed. Filtered from search_graph; kept on disk for audit; bumps cache version so narratives re-generate on next read.
+    When: user says 'that's wrong', 'I never said that', or you find an annotator hallucination.
+    Inputs: target accepts (a) Entity name, (b) edge uuid, (c) Episodic uuid — NOT the friendly `episode_name` 'mcp_<ts>' from add_episode (use get_episode/recent_episodes first to find the uuid).
+    Pair with: precede with find_connections(entity) to verify what you'll retract.
     """
     g = _g()
     now = time.time()
@@ -1260,7 +1140,39 @@ async def retract(target: str, reason: str = "") -> str:
             "error": f"No edges matched target {target!r}. Pass an episode uuid, entity name, or edge uuid.",
         }, indent=2)
 
-    # Invalidate caches: Redis active_memory subgraphs + Redis profile JSON cache
+    # Find unique entity uuids touched by the retracted edges so we can bust
+    # their narrative cache versions. Without this, get_node_narrative serves
+    # the pre-retraction prose forever (Engram's prompt-hash cache key is
+    # stable across the retraction).
+    affected_entity_uuids: list[str] = []
+    try:
+        async with g.driver.session() as session:
+            rows = [
+                r.data()
+                async for r in await session.run(
+                    """
+                    MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)
+                    WHERE r.retracted_at = $now
+                    RETURN collect(DISTINCT a.uuid) + collect(DISTINCT b.uuid) AS uuids
+                    """,
+                    now=now,
+                )
+            ]
+            if rows:
+                seen: set[str] = set()
+                for u in (rows[0].get("uuids") or []):
+                    if u and u not in seen:
+                        seen.add(u)
+                        affected_entity_uuids.append(u)
+    except Exception:
+        pass
+
+    # Invalidate caches:
+    #   - Redis active_memory subgraphs (search_graph hot tier)
+    #   - Redis profile JSON cache (5-min TTL)
+    #   - Per-entity narrative cache versions (incremented; node_narration's
+    #     cache_key_fn includes this so the next narrate call misses Engram
+    #     and re-runs the LLM with the post-retraction summary)
     try:
         import redis.asyncio as _r
         client = _r.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
@@ -1268,6 +1180,8 @@ async def retract(target: str, reason: str = "") -> str:
             await client.delete(key)
         async for key in client.scan_iter(match="cogram:cache:profile:*"):
             await client.delete(key)
+        for uuid in affected_entity_uuids:
+            await client.incr(f"cogram:cache_version:entity:{uuid}")
         await client.aclose()
     except Exception:
         pass
@@ -1303,37 +1217,12 @@ async def retract(target: str, reason: str = "") -> str:
     }, indent=2)
 
 
-@mcp.tool()
-async def confidence(entity_name: str) -> str:
-    """Return the current effective confidence (decayed) and human-readable label
-    for a node. Useful for 'how deeply rooted is the Director's belief about X'."""
-    g = _g()
-    cypher = """
-    MATCH (n:Entity)
-    WHERE toLower(n.name) CONTAINS toLower($q)
-    RETURN
-        n.uuid AS uuid,
-        n.name AS name,
-        coalesce(n.vllm_confidence, 0.0) AS conf,
-        coalesce(n.vllm_last_reinforced, 0.0) AS ts
-    LIMIT 5
-    """
-    async with g.driver.session() as session:
-        rows = [r.data() async for r in await session.run(cypher, q=entity_name)]
-    if not rows:
-        return f"No entity matches '{entity_name}'."
-    out = []
-    for r in rows:
-        decayed = effective_confidence(r["conf"], r["ts"]) if r["ts"] else 0.0
-        out.append({
-            "name": r["name"],
-            "stored_confidence": round(r["conf"], 2),
-            "effective_confidence": round(decayed, 3),
-            "normalized_0_1": round(normalized_confidence(r["conf"], r["ts"]), 3) if r["ts"] else 0.0,
-            "label": label_for(decayed),
-            "last_reinforced_seconds_ago": round(time.time() - r["ts"]) if r["ts"] else None,
-        })
-    return json.dumps(out, indent=2, default=str)
+# NOTE: `confidence` was removed from the MCP surface in v0.2.1.
+# Decay-weighted confidence numbers are infrastructure that leaked into the
+# agent surface — agents almost never need raw scores; they need "is this
+# still believed", and search_graph already filters retracted edges.
+# The decay math stays in cogram.utils.confidence for internal use
+# (profile distillation, cache TTLs, etc.).
 
 
 # ---------------------------------------------------------------------------

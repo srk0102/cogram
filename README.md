@@ -512,7 +512,7 @@ For deep architectural details — the five LLM call types, the three storage ti
 - Async pipeline fires on every `add_episode` (~3s MCP latency, ~15s background)
 - Engram cache + Redis active subgraph wired and active
 - Knot detection + Gemma synthesis with `gpt-4o-mini` fallback
-- 19 MCP tools functional (16 graph tools + 3 episode-task tools)
+- 16 MCP tools functional (13 graph tools + 3 episode-task tools)
 - Public Docker images on ghcr.io, anonymous pull works
 
 **Known limitations:**
@@ -525,6 +525,13 @@ For deep architectural details — the five LLM call types, the three storage ti
 **Shipped in v0.2:**
 - `edge_kind` field in `intent_meta` (`principle` / `action` / `context` / `competitor` / `unknown`) — see [docs/annotator_flaw.md](docs/annotator_flaw.md)
 - Background pipeline task registry + 3 new MCP tools: `list_episode_tasks`, `get_episode_task(task_id, wait_seconds=0)`, `cancel_episode_task`
+- Tiered LLM model split (`LARGE_LLM_*` / `SMALL_LLM_*` / `EMBEDDER_*` env vars) — see [docs/llm_calls.md](docs/llm_calls.md)
+- `instructor` + Pydantic for the 4 post-write LLM calls — typed responses, auto-retry on parse failure
+- Per-group rate-limit gate (`RATE_LIMIT_PER_GROUP_PER_MIN`) so one busy group can't starve others
+- **Knot synthesis runs outside the 120s pipeline timeout** — was getting starved on bigger writes; now fires unbounded with its own rate-cap + delta-gate
+- **Retract bumps per-entity cache version** so node narratives re-generate against the corrected graph (was serving stale prose)
+- **Tool surface trimmed from 19→16:** dropped `get_knot` (knot synthesis isn't reliable enough yet to expose; use `get_node_narrative` instead), `dedup_patterns` (operator-grade — now CLI-only via `python -m cogram.utils.maintenance.pattern_dedup`), `confidence` (decay scores were infrastructure leaking into the agent surface). All three underlying functions still callable from internal code.
+- All 16 remaining tool descriptions rewritten to 4-line format with explicit `Pair with:` routing hints — total doc tokens cut ~60%
 
 **Roadmap (v0.3+):**
 - Opt-in MCP tool to backfill `edge_kind` on legacy edges with a before/after diff of cognitive patterns

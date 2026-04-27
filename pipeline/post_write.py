@@ -266,30 +266,37 @@ async def cogram_post_write(
     started = time.time()
     summary = PipelineSummary()
 
-    async def _run() -> None:
-        episode_uuid = getattr(episode_result.episode, "uuid", None)
-        node_uuids = [getattr(n, "uuid", None) for n in (episode_result.nodes or [])]
-        node_uuids = [u for u in node_uuids if u]
+    episode_uuid = getattr(episode_result.episode, "uuid", None)
+    node_uuids = [getattr(n, "uuid", None) for n in (episode_result.nodes or [])]
+    node_uuids = [u for u in node_uuids if u]
 
+    async def _run_main() -> None:
+        """Annotate + narrate + profile under the pipeline timeout. These
+        block the agent's wait_for_episode_task — bound them strictly."""
         if episode_uuid:
             await _step_annotate(graphiti, episode_uuid, group_id, settings, summary)
         await _step_narrate(graphiti, node_uuids, group_id, settings, summary)
         await _step_profile(graphiti, group_id, settings, summary)
 
-        # Knot synthesis (programmatic detection + Gemma synthesis, rate-limited).
-        try:
-            from cogram.utils.maintenance.knot_synthesis import evaluate_knots
-            knot_summary = await evaluate_knots(graphiti, group_id)
-            summary.knot_synthesis = knot_summary
-        except Exception as exc:
-            summary.skipped.append(f"knots: {exc}")
-
     try:
-        await asyncio.wait_for(_run(), timeout=PIPELINE_TIMEOUT_SECONDS)
+        await asyncio.wait_for(_run_main(), timeout=PIPELINE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
-        summary.error = f"timeout after {PIPELINE_TIMEOUT_SECONDS}s"
+        summary.error = f"main pipeline timeout after {PIPELINE_TIMEOUT_SECONDS}s"
     except Exception as exc:
         summary.error = str(exc)
+
+    # Knot synthesis runs OUTSIDE the timeout: it has its own rate-cap
+    # (RESYNTHESIS_RATE_CAP_PER_HOUR=5/group) and delta-gate (RESYNTHESIS_DELTA=3.0),
+    # so it's already self-bounded. Putting it inside the wait_for caused the
+    # 17-entity-episode failure mode where annotate+narrate ate the full budget
+    # and knots never ran. Worst-case it adds ~30s to background pipeline time
+    # on bigger writes; that's fine — add_episode already returned in ~3s.
+    try:
+        from cogram.utils.maintenance.knot_synthesis import evaluate_knots
+        knot_summary = await evaluate_knots(graphiti, group_id)
+        summary.knot_synthesis = knot_summary
+    except Exception as exc:
+        summary.skipped.append(f"knots: {exc}")
 
     # Invalidate Redis active_memory subgraph for this group so the next
     # search_graph re-pulls from Neo4j and includes the new writes.

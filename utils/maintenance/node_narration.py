@@ -33,6 +33,24 @@ TRAINER_URL = os.environ.get("TRAINER_URL", "http://cogram-trainer:7900")
 USE_T2_IF_AVAILABLE = os.environ.get("NARRATOR_PREFER_T2", "true").lower() == "true"
 
 
+async def _read_entity_cache_version(node_uuid: str) -> int:
+    """Read the per-entity cache version stamp written by retract().
+    Returns 0 if Redis is unreachable or no version exists yet."""
+    try:
+        import redis.asyncio as _r
+        client = _r.from_url(
+            os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+            decode_responses=True,
+        )
+        try:
+            v = await client.get(f"cogram:cache_version:entity:{node_uuid}")
+            return int(v) if v else 0
+        finally:
+            await client.aclose()
+    except Exception:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Selectivity
 # ---------------------------------------------------------------------------
@@ -265,10 +283,17 @@ async def narrate(
         )
         return narrative.model_dump_json()
 
+    # Per-entity cache-version stamp: retract() bumps Redis key
+    # cogram:cache_version:entity:{uuid} when this entity's edges change. We
+    # bake the version into the cache_key so post-retract calls miss the
+    # Engram cache and re-narrate against the corrected graph state. Default
+    # 0 if Redis is unreachable — at worst we get the legacy cached prose.
+    cache_version = await _read_entity_cache_version(node_uuid)
+
     policy = Policy(
         name="node_narration",
         brain=brain,
-        cache_key_fn=lambda p: f"{node_uuid}::{_hash('narration', {'p': p[:1000]})[:16]}",
+        cache_key_fn=lambda p: f"{node_uuid}::v{cache_version}::{_hash('narration', {'p': p[:1000]})[:16]}",
     )
     text = await policy(p=prompt)
     narr = _parse_narrative(text, node_name=ctx["name"], source="T1")

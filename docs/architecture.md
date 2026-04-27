@@ -167,6 +167,27 @@ The per-group history dict opportunistically purges idle groups
 (no acquire in the last 60s) when it grows past 32 entries, so workloads
 with many short-lived group_ids don't leak memory.
 
+## MCP tool surface (v0.2.1, 16 tools)
+
+The agent's job tree maps cleanly onto a session-start ritual:
+
+| Step | Tool | Role |
+|---|---|---|
+| 1 | `list_groups(query?)` | **First call.** Discover what contexts exist before searching. |
+| 2 | `get_director_profile(group_id)` or `get_unified_profile()` | User's reasoning model — pick a group or merge across all. |
+| 3 | `get_node_narrative(entity_name)` | Compressed view of a specific entity (the *what is X* tool). |
+| 4 | `edges_by_pattern(pattern)` | Cross-decision routing — surfaces every prior decision under one cognitive pattern. |
+| 5 | `search_graph(query, group_id)` | General semantic lookup. Profile-aware on subjective queries. |
+| 6 | `find_connections(entity)` | Raw edge dump for an entity — audit / fallback when narrative is stale. |
+| W | `add_episode` / `record_fact` | Write tools. Return a `task_id` you can wait on. |
+| W+ | `get_episode_task(task_id, wait_seconds=N)` | Block until annotations settle before reading the graph. |
+
+Three tools were dropped from the MCP surface in v0.2.1:
+
+- **`get_knot`** — knot synthesis runs unreliably until the rate-cap + timeout interactions stabilize; agents calling `get_knot` first got an empty hint ~95% of the time. Use `get_node_narrative` instead. The synthesizer still runs in the background pipeline; it just isn't exposed as an agent tool yet.
+- **`dedup_patterns`** — operator-grade maintenance, not agent-grade. Triggering bulk embedding calls during a chat session can merge pattern names across in-flight conversations. Now CLI-only: `python -m cogram.utils.maintenance.pattern_dedup`.
+- **`confidence`** — decay-weighted scores are internal infrastructure. Agents need *"is this still believed"*, which `search_graph` already filters via retraction.
+
 ## Backward compatibility
 
 - `Graphiti = Cogram` aliased at module level — `from cogram import Graphiti` keeps working
