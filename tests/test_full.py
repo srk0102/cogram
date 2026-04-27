@@ -14,7 +14,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-from graphiti_core.nodes import EpisodeType
+from cogram.core.nodes import EpisodeType
 
 from cogram.core.config import Settings, build_graphiti
 from cogram.pipeline.post_write import cogram_post_write

@@ -233,7 +233,7 @@ class GraphitiAdapter(Adapter):
         await self.graphiti.build_indices_and_constraints()
 
     async def ingest(self, doc_id: str, text: str, meter: CostMeter) -> None:
-        from graphiti_core.nodes import EpisodeType
+        from cogram.core.nodes import EpisodeType
         # Graphiti makes ~10 LLM calls per add_episode internally; we estimate
         meter.add_chat(in_t=len(text) // 4 * 5 + 1500, out_t=1500)
         meter.add_embed(n=len(text) // 4 * 3 + 300)
@@ -329,7 +329,7 @@ class CogramAdapter(Adapter):
             return None
 
     async def ingest(self, doc_id: str, text: str, meter: CostMeter) -> None:
-        from graphiti_core.nodes import EpisodeType
+        from cogram.core.nodes import EpisodeType
         # Cogram = graphiti + intent annotation pass + node narrator (later)
         # Ingest cost = graphiti + 1 annotation per edge (~5 edges/doc avg)
         meter.add_chat(in_t=len(text) // 4 * 5 + 1500, out_t=1500)

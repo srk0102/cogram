@@ -44,7 +44,7 @@ RESYNTHESIS_DELTA = float(os.environ.get('COGRAM_RESYNTHESIS_DELTA', '3.0'))
 RATE_CAP_PER_HOUR = int(os.environ.get('COGRAM_RESYNTHESIS_RATE_CAP_PER_HOUR', '5'))
 
 GEMMA_BASE_URL = os.environ.get('GEMMA_BASE_URL', 'http://host.docker.internal:11434/v1')
-GEMMA_MODEL = os.environ.get('GEMMA_MODEL', 'gemma3:4b')
+GEMMA_MODEL = os.environ.get('GEMMA_MODEL', 'gemma3n:e4b')
 SYNTHESIS_FALLBACK_MODEL = os.environ.get('COGRAM_SYNTHESIS_FALLBACK_MODEL', 'gpt-4o-mini')
 
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')

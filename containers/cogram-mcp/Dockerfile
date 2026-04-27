@@ -1,9 +1,11 @@
 # Cogram MCP server: serves cogram tools over stdio AND HTTP/SSE on :7800/mcp
 #
-# Layout: the repo root IS the cogram package. pyproject.toml + __init__.py
-# + cogram.py + py.typed all sit at the same level. Build context is the repo
-# root. Setuptools' package_dir = {"cogram": "."} maps the package "cogram"
-# to that directory.
+# Layout: the repo IS the cogram package (pyproject.toml + __init__.py + main.py
+# + py.typed all sit at the same level). We copy the entire repo to /app/cogram/
+# and use PYTHONPATH=/app so `import cogram` resolves to /app/cogram/__init__.py.
+# Skipping `pip install -e .` because setuptools' editable install fights with
+# package_dir = {"cogram": "."} when the repo root contains both __init__.py
+# and other Python files at the same level.
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -17,11 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy the entire repo (which IS the cogram package) into /app/cogram/
 COPY . /app/cogram/
-WORKDIR /app/cogram
 
-# Single editable install — package "cogram" maps to /app/cogram per pyproject
+# Install dependencies from requirements.txt (no editable package install needed)
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -e .
+    pip install --no-cache-dir -r /app/cogram/requirements.txt
+
+# Make /app discoverable so `import cogram` finds /app/cogram/__init__.py
+ENV PYTHONPATH=/app
 
 EXPOSE 7800
 

@@ -115,51 +115,20 @@ services:
       - cogram
 
   # ==========================================================================
-  # Baseline MCP server — same graph, NO profile injection (acts like stock graphiti)
-  # Use for A/B testing against the full cogram-mcp service.
-  # ==========================================================================
-  cogram-mcp-baseline:
-    build:
-      context: .
-      dockerfile: containers/cogram-mcp/Dockerfile
-    container_name: cogram-mcp-baseline
-    ports:
-      - "7802:7802"
-    environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      GRAPHITI_LLM_MODEL: ${GRAPHITI_LLM_MODEL:-gpt-4o-mini}
-      ANNOTATOR_LLM_MODEL: ${ANNOTATOR_LLM_MODEL:-gpt-4o-mini}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
-      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-150}
-      NEO4J_URI: bolt://neo4j:7687
-      NEO4J_USER: neo4j
-      NEO4J_PASSWORD: password
-      REDIS_URL: redis://redis:6379/0
-      POSTGRES_DSN: postgresql://cogram:cogram@postgres:5432/cogram
-      MCP_HTTP_PORT: 7802
-      COGRAM_PROFILE_INJECTION: "false"
-      COGRAM_SERVER_NAME: "graphiti-baseline"
-    volumes:
-      - cogram_episodes:/app/episodes
-      - cogram_cache:/app/cache
-    depends_on:
-      neo4j:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    command: ["python", "-m", "cogram.server.mcp", "--http", "--host", "0.0.0.0", "--port", "7802"]
-    networks:
-      - cogram
-
-  # ==========================================================================
-  # Cogram trainer (Qwen 2.5 1.5B + PEFT + LoRA scheduler)
+  # Cogram trainer (Qwen / Gemma + PEFT + LoRA scheduler)
   # GPU optional; falls back to CPU. Uses VRAM coexistence (5-layer).
+  #
+  # Purpose: trains per-node LoRA adapters from accumulated synthesis pairs in
+  # engram.training_data. Once trained, those adapters REPLACE Gemma for that
+  # node's narrations — smaller, faster, personalized to the user's voice.
+  #
+  # Opt-in only: requires `--profile training` to start, since it needs ≥50
+  # samples per node before doing anything useful (months of normal usage).
+  # `docker compose up` skips trainer; `docker compose --profile training up`
+  # brings it in.
   # ==========================================================================
   cogram-trainer:
+    profiles: ["training"]
     build:
       context: .
       dockerfile: containers/cogram-trainer/Dockerfile

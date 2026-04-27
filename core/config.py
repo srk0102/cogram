@@ -7,11 +7,11 @@ from dotenv import load_dotenv
 # Silence graphiti's noisy "index already exists" errors on rerun.
 logging.getLogger("graphiti_core").setLevel(logging.CRITICAL)
 logging.getLogger("neo4j").setLevel(logging.ERROR)
-from graphiti_core import Graphiti
-from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
-from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
-from graphiti_core.llm_client.config import LLMConfig
-from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+from cogram import Graphiti
+from cogram.cross_encoder.openai_reranker_client import OpenAIRerankerClient
+from cogram.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+from cogram.llm_client.config import LLMConfig
+from cogram.llm_client.openai_generic_client import OpenAIGenericClient
 
 load_dotenv()
 
@@ -101,13 +101,13 @@ def build_graphiti(settings: Settings | None = None) -> Graphiti:
     }
 
     if provider == "falkordb":
-        from graphiti_core.driver.falkordb_driver import FalkorDriver
+        from cogram.driver.falkordb_driver import FalkorDriver
         host = os.environ.get("FALKORDB_HOST", "localhost")
         port = int(os.environ.get("FALKORDB_PORT", "6379"))
         graph_kwargs["graph_driver"] = FalkorDriver(host=host, port=port)
         g = Graphiti(**graph_kwargs)
     elif provider == "kuzu":
-        from graphiti_core.driver.kuzu_driver import KuzuDriver
+        from cogram.driver.kuzu_driver import KuzuDriver
         db_path = os.environ.get("KUZU_DB_PATH", "./cache/kuzu.db")
         graph_kwargs["graph_driver"] = KuzuDriver(db=db_path)
         g = Graphiti(**graph_kwargs)

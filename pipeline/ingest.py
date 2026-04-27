@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from graphiti_core.nodes import EpisodeType
+from cogram.core.nodes import EpisodeType
 
 from cogram.core.config import build_graphiti
 

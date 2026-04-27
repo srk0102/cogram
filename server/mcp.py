@@ -742,7 +742,7 @@ async def add_episode(content: str, source_description: str = "claude-mcp", grou
     the pipeline result is published to the 'cogram:events:pipeline_done'
     Redis channel."""
     from datetime import datetime, timezone
-    from graphiti_core.nodes import EpisodeType
+    from cogram.core.nodes import EpisodeType
     g = _g()
     name = f"mcp_{int(time.time()*1000)}"
     try:

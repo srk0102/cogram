@@ -21,7 +21,7 @@ import numpy as np
 import openai
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 
-from ..helpers import semaphore_gather
+from ..utils.helpers import semaphore_gather
 from ..llm_client import LLMConfig, OpenAIClient, RateLimitError
 from ..prompts import Message
 from .client import CrossEncoderClient

@@ -18,7 +18,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-from ..helpers import semaphore_gather
+from ..utils.helpers import semaphore_gather
 from ..llm_client import LLMConfig, RateLimitError
 from .client import CrossEncoderClient
 
