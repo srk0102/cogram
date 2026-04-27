@@ -449,15 +449,22 @@ For deep architectural details — the five LLM call types, the three storage ti
 - Async pipeline fires on every `add_episode` (~3s MCP latency, ~15s background)
 - Engram cache + Redis active subgraph wired and active
 - Knot detection + Gemma synthesis with `gpt-4o-mini` fallback
-- All 13 MCP tools functional
+- 20 MCP tools functional (16 graph tools + 4 task management tools)
 - Public Docker images on ghcr.io, anonymous pull works
 
 **Known limitations:**
-- LLM annotator can confuse "context" with "user intent" on edges that mention competitors. Mitigation: use `record_fact` for foundational principles to lock the SPO structure.
+- ~~LLM annotator can confuse "context" with "user intent" on edges that mention competitors.~~ **Mitigated in v0.2** by the `edge_kind` taxonomy (`principle` / `action` / `context` / `competitor` / `unknown`) — context and competitor edges no longer pollute the Director profile. See [docs/annotator_flaw.md](docs/annotator_flaw.md) for the full write-up.
 - Trainer container (T2 LoRA per-node adapters) is opt-in via `docker compose --profile training up`, deferred until ≥50 samples per node.
+- Task registry is process-local in-memory; horizontal scale-out needs sticky routing per group_id.
 
-**Roadmap (v0.2):**
-- `edge_kind` field in `intent_meta` to distinguish principle / action / context / competitor edges
+**Shipped in v0.2:**
+- `edge_kind` field in `intent_meta` (`principle` / `action` / `context` / `competitor` / `unknown`) — see [docs/annotator_flaw.md](docs/annotator_flaw.md)
+- Background pipeline task registry + 4 new MCP tools: `list_add_memory_tasks`, `get_add_memory_task_status`, `wait_for_add_memory_task`, `cancel_add_memory_task`
+
+**Roadmap (v0.3+):**
+- Opt-in MCP tool to backfill `edge_kind` on legacy edges with a before/after diff of cognitive patterns
+- Weighted distillation (instead of filtering): `principle=1.0`, `action=0.7`, `unknown=0.3`, `context/competitor=0.0`
+- Entity-level `is_director_owned` flag so the annotator distinguishes Director's own products from external tools
 - Inline cogram value-add deeper into graphiti's hot-path functions
 - T2 LoRA training activation
 - REST API for non-MCP clients

@@ -28,11 +28,36 @@ Source episode excerpts:
 {episodes}
 ---
 
+CRITICAL: classify what *kind* of edge this is. The Director's downstream
+profile is built only from edges that reflect the Director's own beliefs and
+actions — NOT from background context or competitor research the Director was
+merely citing. Pick exactly one edge_kind:
+
+  principle  — A belief, value, preference, rule, or stance the Director holds.
+               ("I always cache LLM outputs because of cost.")
+  action     — Something the Director did, decided, built, deployed, or chose.
+               ("Deployed cogram-mcp to ghcr.io.")
+  context    — A neutral background fact about a third-party tool, product, or
+               concept the Director is reasoning about. Director is NOT
+               endorsing it. ("Graphiti stores edges in Neo4j.")
+  competitor — Information about a competing product or alternative approach
+               the Director is comparing AGAINST. Director is explicitly NOT
+               endorsing it. ("Mem0 uses Qdrant for embeddings.")
+  unknown    — Genuinely cannot tell from the fact + episodes available.
+
+Heuristics that should push you toward context/competitor (NOT principle):
+  - The fact is about a tool/library/product whose name is not the Director's own.
+  - The episode mentions the entity by way of comparison ("unlike X", "vs Y",
+    "competitor", "alternative", "similar to").
+  - The fact is a feature description that could have come from a public
+    README ("Tool X uses Y for Z"); it doesn't reveal what the Director thinks.
+
 Answer in strict JSON, no prose, no markdown fences:
 {{
-  "why_connected": "<one sentence: the underlying reason the Director linked these two>",
-  "director_vision": "<one sentence: the larger goal or outcome this link serves>",
-  "cognitive_pattern": "<2-5 word label for the thinking style this reveals, e.g. 'cost-aware prototyping', 'first-principles validation'>"
+  "edge_kind": "principle | action | context | competitor | unknown",
+  "why_connected": "<one sentence: the underlying reason this edge exists>",
+  "director_vision": "<one sentence: the larger goal or outcome this link serves; '' if edge_kind is context/competitor/unknown>",
+  "cognitive_pattern": "<2-5 word label for the thinking style this reveals, e.g. 'cost-aware prototyping', 'first-principles validation'; '' if edge_kind is context/competitor/unknown>"
 }}"""
 
 EDGES_QUERY_ALL = """
@@ -84,6 +109,37 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
+VALID_EDGE_KINDS = {"principle", "action", "context", "competitor", "unknown"}
+
+
+def _normalize_edge_kind(value: str | None) -> str:
+    """Coerce LLM output to one of VALID_EDGE_KINDS; map common synonyms."""
+    if not value:
+        return "unknown"
+    v = str(value).strip().lower()
+    if v in VALID_EDGE_KINDS:
+        return v
+    # Common LLM synonyms / hedges
+    synonyms = {
+        "belief": "principle",
+        "value": "principle",
+        "preference": "principle",
+        "rule": "principle",
+        "stance": "principle",
+        "decision": "action",
+        "deployment": "action",
+        "build": "action",
+        "background": "context",
+        "fact": "context",
+        "third-party": "context",
+        "external": "context",
+        "alternative": "competitor",
+        "competing": "competitor",
+        "rival": "competitor",
+    }
+    return synonyms.get(v, "unknown")
+
+
 async def _annotate_one(client: AsyncOpenAI, model: str, row: dict, episode_text: str) -> dict:
     prompt = ANNOTATION_PROMPT.format(
         a_name=row["a_name"],
@@ -102,7 +158,9 @@ async def _annotate_one(client: AsyncOpenAI, model: str, row: dict, episode_text
     )
     msg = resp.choices[0].message
     text = (msg.content or "") or (getattr(msg, "reasoning_content", None) or "")
-    return _extract_json(text)
+    meta = _extract_json(text)
+    meta["edge_kind"] = _normalize_edge_kind(meta.get("edge_kind"))
+    return meta
 
 
 async def _fetch_episode_text(graphiti, episode_uuids: list[str]) -> str:

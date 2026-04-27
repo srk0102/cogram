@@ -794,27 +794,42 @@ async def get_episode(uuid: str) -> str:
 _PIPELINE_MODE = os.environ.get("COGRAM_PIPELINE_MODE", "async").lower()  # 'async' | 'sync'
 
 
-async def _run_pipeline_background(g, result, group_id: str, settings, episode_name: str) -> None:
+async def _run_pipeline_background(
+    g, result, group_id: str, settings, episode_name: str, task_id: str | None = None
+) -> None:
     """Background pipeline execution. Errors are logged to stdout + Redis events;
-    they never block the MCP response."""
+    they never block the MCP response. If a task_id is provided, the task
+    registry is updated with the terminal state (done/failed/cancelled) so the
+    task-management MCP tools can report status."""
+    from cogram.pipeline import tasks as _tasks
     try:
         from cogram.pipeline.post_write import cogram_post_write
         summary = await cogram_post_write(graphiti=g, episode_result=result, group_id=group_id, settings=settings)
+        if task_id:
+            _tasks.mark_done(task_id, summary)
         # Emit the pipeline-completion event so dashboard/clients can react
         try:
             from cogram.utils import events as _ev
             await _ev.publish("cogram:events:pipeline_done", {
+                "task_id": task_id,
                 "episode_name": episode_name,
                 "group_id": group_id,
                 "summary": summary,
             })
         except Exception:
             pass
+    except asyncio.CancelledError:
+        if task_id:
+            _tasks.mark_cancelled(task_id)
+        raise
     except Exception as exc:
+        if task_id:
+            _tasks.mark_failed(task_id, str(exc))
         print(f"[cogram] background pipeline failed for {episode_name}: {exc}")
         try:
             from cogram.utils import events as _ev
             await _ev.publish("cogram:events:pipeline_done", {
+                "task_id": task_id,
                 "episode_name": episode_name,
                 "group_id": group_id,
                 "error": str(exc),
@@ -880,12 +895,26 @@ async def add_episode(content: str, source_description: str = "claude-mcp", grou
                 except Exception as pipe_exc:
                     response["cogram"] = {"error": f"pipeline failed: {pipe_exc}"}
             else:
-                # Fire-and-forget: pipeline runs as a background task
-                asyncio.create_task(_run_pipeline_background(g, result, group_id, _settings(), name))
+                # Fire-and-forget: pipeline runs as a background task. We
+                # allocate the task_id up front so the coroutine can update
+                # its own status via the task registry, then register the
+                # asyncio.Task handle so the management tools can cancel it.
+                from cogram.pipeline import tasks as _tasks
+                task_id = _tasks.new_task_id()
+                bg = asyncio.create_task(
+                    _run_pipeline_background(g, result, group_id, _settings(), name, task_id)
+                )
+                _tasks.register(bg, episode_name=name, group_id=group_id, task_id=task_id)
                 response["cogram"] = {
                     "mode": "async",
                     "status": "pipeline_running_in_background",
-                    "note": "intent_meta/narrative/profile will populate within ~15s. Subscribe to cogram:events:pipeline_done for completion signal.",
+                    "task_id": task_id,
+                    "note": (
+                        "intent_meta/narrative/profile will populate within ~15s. "
+                        "Poll get_add_memory_task_status(task_id) or block on "
+                        "wait_for_add_memory_task(task_id). Subscribe to "
+                        "cogram:events:pipeline_done for the same signal via Redis."
+                    ),
                 }
 
         return json.dumps(response, indent=2)
@@ -901,6 +930,116 @@ async def record_fact(subject: str, predicate: str, object: str, group_id: str =
         content=f"{subject} {predicate} {object}",
         source_description="claude-fact",
         group_id=group_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Async pipeline task management
+#
+# When add_episode runs in async mode (the default), the cogram post-write
+# pipeline (annotation / narration / profile / knot synthesis) runs in the
+# background and the task_id is returned in the add_episode response.
+# These four tools let an MCP client introspect and control those tasks
+# without subscribing to the Redis events channel.
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def list_add_memory_tasks(
+    group_id: str = "",
+    state: str = "",
+    limit: int = 50,
+) -> str:
+    """List in-flight and recently completed background pipeline tasks spawned
+    by add_episode (async mode). Newest first.
+
+    Filters:
+      group_id  — restrict to one group; empty = all groups
+      state     — 'running' | 'done' | 'failed' | 'cancelled' | '' (all)
+      limit     — max records to return (default 50)
+
+    The registry holds the most recent ~200 records process-wide; older finished
+    tasks are evicted in FIFO order. Restarting the MCP server clears it."""
+    from cogram.pipeline import tasks as _tasks
+    items = _tasks.list_tasks(
+        group_id=group_id or None,
+        state=state or None,
+        limit=limit,
+    )
+    return json.dumps(
+        {
+            "count": len(items),
+            "tasks": [r.to_dict() for r in items],
+        },
+        indent=2,
+        default=str,
+    )
+
+
+@mcp.tool()
+async def get_add_memory_task_status(task_id: str) -> str:
+    """Return the current state + summary of a background pipeline task.
+
+    States:
+      running   — pipeline still working
+      done      — finished; full summary available (edges_annotated,
+                  nodes_narrated, profile_distilled, knot_synthesis, ...)
+      failed    — exception; see `error` field
+      cancelled — cancelled via cancel_add_memory_task
+
+    Returns ok=False if the task_id is unknown (registry was cleared, or
+    record was evicted past COGRAM_TASK_HISTORY)."""
+    from cogram.pipeline import tasks as _tasks
+    rec = _tasks.get(task_id)
+    if rec is None:
+        return json.dumps(
+            {"ok": False, "error": f"unknown task_id {task_id!r}"},
+            indent=2,
+        )
+    return json.dumps({"ok": True, **rec.to_dict()}, indent=2, default=str)
+
+
+@mcp.tool()
+async def wait_for_add_memory_task(task_id: str, timeout_seconds: float = 30.0) -> str:
+    """Block until the named pipeline task finishes (done / failed / cancelled),
+    or `timeout_seconds` elapses. Returns the same shape as
+    get_add_memory_task_status; the `state` field tells you whether the task
+    finished or the wait timed out.
+
+    Typical use: an agent calls add_episode and then immediately asks the graph
+    a question that depends on the post-write annotations. Block on the task_id
+    first to avoid a stale read."""
+    from cogram.pipeline import tasks as _tasks
+    try:
+        rec = await _tasks.wait(task_id, timeout=timeout_seconds)
+    except KeyError:
+        return json.dumps(
+            {"ok": False, "error": f"unknown task_id {task_id!r}"},
+            indent=2,
+        )
+    return json.dumps({"ok": True, **rec.to_dict()}, indent=2, default=str)
+
+
+@mcp.tool()
+async def cancel_add_memory_task(task_id: str) -> str:
+    """Request cancellation of a still-running pipeline task. Returns
+    ok=True if a running task was cancelled, ok=False if the task was
+    already terminal or unknown.
+
+    Cancellation is cooperative: the task hits its next `await` and aborts
+    with asyncio.CancelledError. Any annotations / narrations already
+    written to Neo4j stay; only future steps are skipped."""
+    from cogram.pipeline import tasks as _tasks
+    cancelled = _tasks.cancel(task_id)
+    return json.dumps(
+        {
+            "ok": cancelled,
+            "task_id": task_id,
+            "note": (
+                "Task cancellation requested." if cancelled
+                else "No running task with that id (already terminal or unknown)."
+            ),
+        },
+        indent=2,
     )
 
 

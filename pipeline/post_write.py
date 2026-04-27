@@ -135,7 +135,12 @@ def _should_redistill(group_id: str, profile_present: bool, edges_annotated: int
 
 async def _collect_annotated_edges_for_group(graphiti, group_id: str) -> list[dict]:
     """Same shape as profile.main() COLLECT_QUERY but filtered by group_id.
-    Excludes retracted edges so the distilled profile reflects current beliefs."""
+    Excludes retracted edges so the distilled profile reflects current beliefs.
+    Also filters out edges whose edge_kind is `context` or `competitor` so
+    background facts about third-party tools don't pollute the Director profile
+    (see docs/annotator_flaw.md for why)."""
+    from cogram.utils.maintenance.profile_distillation import PROFILE_ELIGIBLE_KINDS
+
     cypher = """
     MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)
     WHERE r.intent_meta IS NOT NULL
@@ -157,6 +162,11 @@ async def _collect_annotated_edges_for_group(graphiti, group_id: str) -> list[di
         except (TypeError, json.JSONDecodeError):
             continue
         if not isinstance(meta, dict):
+            continue
+        # edge_kind filter: skip context/competitor edges (legacy edges without
+        # the field default to 'unknown' and remain eligible).
+        edge_kind = (meta.get("edge_kind") or "unknown").strip().lower()
+        if edge_kind not in PROFILE_ELIGIBLE_KINDS:
             continue
         edges_data.append({
             "a": row["a"],

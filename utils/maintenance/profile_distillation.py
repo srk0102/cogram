@@ -39,8 +39,14 @@ RETURN a.name AS a, a.uuid AS a_uuid,
 """
 
 COMPRESSION_PROMPT = """You are given every annotated edge from the Director's
-knowledge graph. Each edge has a "why_connected", "director_vision", and
-"cognitive_pattern". Synthesize them into a single profile.
+knowledge graph. Each edge has an "edge_kind", "why_connected",
+"director_vision", and "cognitive_pattern". Synthesize them into a single
+profile.
+
+The edges have already been pre-filtered to remove `context` and `competitor`
+edges (background facts about third-party tools the Director was merely
+referencing). Every edge below reflects the Director's own beliefs
+(edge_kind=principle) or actions (edge_kind=action) — treat them accordingly.
 
 Edges (JSON list):
 {edges}
@@ -51,6 +57,13 @@ Return strict JSON, no markdown:
   "recurring_visions": ["<2-6 distinct goals the Director repeatedly pursues>"],
   "working_style_summary": "<3-5 sentences in second person ('You ...') describing how the Director approaches problems, what they value, what they avoid>"
 }}"""
+
+# Edge kinds that contribute to the Director's profile / cognitive patterns.
+# `context` and `competitor` edges are excluded so background facts about
+# third-party tools the Director is comparing against don't show up as the
+# Director's own beliefs. `unknown` is included because it's the safe default
+# for legacy edges annotated before the edge_kind field existed.
+PROFILE_ELIGIBLE_KINDS = {"principle", "action", "unknown"}
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +186,12 @@ async def main() -> None:
         except (TypeError, json.JSONDecodeError):
             continue
         if not isinstance(meta, dict):
+            continue
+        # Skip edges that are context/competitor (background facts that don't
+        # represent the Director's beliefs). Legacy edges without edge_kind
+        # default to 'unknown' and are kept.
+        edge_kind = (meta.get("edge_kind") or "unknown").strip().lower()
+        if edge_kind not in PROFILE_ELIGIBLE_KINDS:
             continue
         edges_data.append({
             "a": row["a"],
