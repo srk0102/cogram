@@ -546,15 +546,30 @@ async def find_connections(entity_name: str, limit: int = 25) -> str:
 
 
 @mcp.tool()
-async def list_groups() -> str:
-    """List every distinct group_id in the graph, with episode + entity counts
-    and whether each group has a distilled :DirectorProfile yet.
+async def list_groups(query: str = "", limit: int = 20, offset: int = 0) -> str:
+    """List group_ids in the graph with episode/entity/pattern/knot counts.
 
-    Use this to discover what projects / contexts the user has memory for
-    before asking targeted questions. Common pattern: call list_groups() once
-    at session start, then route subsequent queries to the right group_id."""
+    Args:
+      query:  optional substring filter on group_id (case-insensitive).
+              e.g. query='cogram' matches 'cogram-knowledge' and 'cogram-test'.
+              Empty string returns all (default).
+      limit:  max number of groups to return (default 20, max 200).
+      offset: skip the first N matches for pagination (default 0).
+
+    Use at session start to discover what projects / contexts the user has
+    memory for, then route subsequent queries to the right group_id. The
+    query parameter is the cheap way to find a specific group when the user
+    has many — don't pull the entire list if you only want the cogram-* ones.
+
+    Returns paginated results with `total` (matched groups) and `returned`
+    (groups in this page). If `total > offset + returned`, call again with
+    a higher offset to get the next page.
+    """
     g = _g()
-    # Query each tier separately, then merge in Python.
+    limit = max(1, min(int(limit or 20), 200))
+    offset = max(0, int(offset or 0))
+    needle = (query or "").strip().lower()
+
     eps_q = "MATCH (e:Episodic) RETURN coalesce(e.group_id, 'default') AS gid, count(e) AS n"
     ent_q = "MATCH (n:Entity) RETURN coalesce(n.group_id, 'default') AS gid, count(n) AS n"
     pat_q = "MATCH (p:CognitivePattern) RETURN coalesce(p.group_id, 'default') AS gid, count(p) AS n"
@@ -569,7 +584,12 @@ async def list_groups() -> str:
         profiles = {r["gid"] for r in [r.data() async for r in await session.run(profile_q)]}
 
     all_gids = set(eps) | set(ents) | set(pats) | set(knots) | profiles
-    rows = sorted(
+
+    # Substring filter (skip when needle is empty)
+    if needle:
+        all_gids = {g for g in all_gids if needle in g.lower()}
+
+    rows_all = sorted(
         [
             {
                 "group_id": gid,
@@ -583,16 +603,42 @@ async def list_groups() -> str:
         ],
         key=lambda r: (-r["episodes"], -r["entities"]),
     )
-    if not rows:
-        return json.dumps({"groups": [], "note": "No data yet. Use add_episode to start a memory."}, indent=2)
-    return json.dumps({"groups": rows, "total_groups": len(rows)}, indent=2, default=str)
+
+    total = len(rows_all)
+    page = rows_all[offset : offset + limit]
+
+    response: dict = {"groups": page, "total": total, "returned": len(page)}
+    if query:
+        response["query"] = query
+    if total > offset + len(page):
+        response["next_offset"] = offset + len(page)
+        response["hint"] = f"call list_groups(query={query!r}, limit={limit}, offset={offset + len(page)}) for the next page"
+    if total == 0:
+        response["note"] = (
+            "No matching groups." if needle else "No data yet. Use add_episode to start a memory."
+        )
+    return json.dumps(response, indent=2, default=str)
 
 
 @mcp.tool()
-async def list_cognitive_patterns() -> str:
-    """List every distinct cognitive_pattern label found in the graph,
-    with how many edges carry each label."""
+async def list_cognitive_patterns(query: str = "", limit: int = 20, offset: int = 0) -> str:
+    """List distinct cognitive_pattern labels with edge counts.
+
+    Args:
+      query:  optional substring filter on pattern name (case-insensitive).
+              e.g. query='legal' matches 'legal risk mitigation' and
+              'legal compliance focus'. Empty returns all (default).
+      limit:  max patterns returned (default 20, max 200).
+      offset: skip first N matches for pagination.
+
+    Patterns are sorted by edge_count DESC (most-reinforced first), so
+    limit=10 with empty query returns the user's top 10 thinking styles.
+    """
     g = _g()
+    limit = max(1, min(int(limit or 20), 200))
+    offset = max(0, int(offset or 0))
+    needle = (query or "").strip().lower()
+
     cypher = """
     MATCH ()-[r:RELATES_TO]->()
     WHERE r.intent_meta IS NOT NULL
@@ -605,10 +651,25 @@ async def list_cognitive_patterns() -> str:
         meta = _parse_json(row["m"])
         if meta and (p := meta.get("cognitive_pattern")):
             counts[p] = counts.get(p, 0) + 1
-    if not counts:
-        return "No annotated edges yet."
-    sorted_counts = sorted(counts.items(), key=lambda kv: -kv[1])
-    return json.dumps([{"pattern": k, "edge_count": v} for k, v in sorted_counts], indent=2)
+
+    items = [{"pattern": k, "edge_count": v} for k, v in counts.items()]
+    if needle:
+        items = [it for it in items if needle in it["pattern"].lower()]
+    items.sort(key=lambda it: -it["edge_count"])
+
+    total = len(items)
+    page = items[offset : offset + limit]
+    response: dict = {"patterns": page, "total": total, "returned": len(page)}
+    if query:
+        response["query"] = query
+    if total > offset + len(page):
+        response["next_offset"] = offset + len(page)
+        response["hint"] = f"call list_cognitive_patterns(query={query!r}, limit={limit}, offset={offset + len(page)}) for the next page"
+    if total == 0:
+        response["note"] = (
+            "No matching patterns." if needle else "No annotated edges yet."
+        )
+    return json.dumps(response, indent=2, default=str)
 
 
 @mcp.tool()
