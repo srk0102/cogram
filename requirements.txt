@@ -22,6 +22,9 @@ asyncpg>=0.29
 # Redis (active subgraph hot tier + pub/sub events)
 redis>=5.1
 
+# Typed structured-output wrapper for the 4 post-write LLM calls (v0.2)
+instructor>=1.5.0
+
 # Optional graph DB drivers (benchmark / alternative providers)
 # falkordb>=1.1.2,<2.0.0
 # kuzu>=0.11.3
