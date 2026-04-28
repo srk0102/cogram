@@ -22,6 +22,11 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          # Don't write a credential header for github.com using GITHUB_TOKEN.
+          # The header would override the PAT embedded in the gramies remote URL,
+          # causing the push to authenticate as github-actions[bot] (which has no
+          # rights on Gramies/cogram) and fail with 403.
+          persist-credentials: false
 
       - name: Push master into Gramies/cogram main
         run: |
