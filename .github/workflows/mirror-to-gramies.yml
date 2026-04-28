@@ -1,0 +1,37 @@
+name: Mirror to Gramies/cogram
+
+# Mirrors srk0102/cogram master into Gramies/cogram main on every push so
+# the company-branded GitHub presence stays in sync without manual work.
+# srk0102/cogram remains the canonical source of truth — Gramies/cogram is
+# read-only. Direct commits to Gramies/cogram main will be force-overwritten
+# on the next mirror sync.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Push master into Gramies/cogram main
+        run: |
+          set -euo pipefail
+          git remote add gramies "https://x-access-token:${GRAMIES_MIRROR_TOKEN}@github.com/Gramies/cogram.git"
+          # srk0102/cogram uses 'master'; Gramies/cogram uses 'main'.
+          # Map the branch on push so the mirror lands on the right ref.
+          git push gramies master:main --force
+          # Tags carry the same content; force them too so versioned tags
+          # appear identically in both repos.
+          git push gramies --tags --force
+        env:
+          GRAMIES_MIRROR_TOKEN: ${{ secrets.GRAMIES_MIRROR_TOKEN }}
