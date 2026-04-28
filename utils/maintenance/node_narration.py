@@ -113,11 +113,16 @@ Generate a narrated perspective. Output STRICT JSON, no prose, no fences:
 
 
 async def _gather_context_for_node(graphiti, node_uuid: str, group_id: str) -> dict:
-    """Pull edges, intent_meta JSONs, and connected entities for a node."""
+    """Pull edges, intent_meta JSONs, and connected entities for a node.
+
+    Excludes retracted edges (`r.retracted_at IS NOT NULL`) so re-narration
+    after a retract doesn't echo facts the user has explicitly disowned.
+    Without this filter, the cache_version bump on retract would still
+    feed retracted-edge text into the new narration prompt."""
     cypher = """
     MATCH (n:Entity {uuid: $uuid})
     OPTIONAL MATCH (n)-[r:RELATES_TO]-(other:Entity)
-    WHERE other.group_id = $group_id
+    WHERE other.group_id = $group_id AND r.retracted_at IS NULL
     WITH n, collect({
         fact: coalesce(r.fact, ''),
         intent_meta: r.intent_meta,

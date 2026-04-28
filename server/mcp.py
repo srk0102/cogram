@@ -612,13 +612,17 @@ async def edges_by_pattern(pattern: str, limit: int = 25) -> str:
 _ENTITY_NARRATIVE_CYPHER = """
 MATCH (n:Entity)
 WHERE toLower(n.name) CONTAINS toLower($q)
+OPTIONAL MATCH (n)-[r:RELATES_TO]-()
+WITH n, count(r) AS degree
+ORDER BY degree DESC
 RETURN
     n.uuid AS uuid,
     n.name AS name,
     coalesce(n.summary, '') AS summary,
     n.vllm_narrative AS narrative,
     coalesce(n.vllm_confidence, 0.0) AS confidence,
-    coalesce(n.vllm_last_reinforced, 0.0) AS last_reinforced
+    coalesce(n.vllm_last_reinforced, 0.0) AS last_reinforced,
+    degree
 LIMIT 5
 """
 
@@ -653,6 +657,7 @@ async def _entity_narrative_view(g, entity_name: str) -> list[dict]:
         out.append({
             "uuid": r["uuid"],
             "name": r["name"],
+            "degree": r.get("degree", 0),
             "summary": r["summary"],
             "narrative": narr if narr else "(no narrative generated yet — request via re-narration)",
             "confidence_stored": r["confidence"],
@@ -850,6 +855,21 @@ async def add_episode(content: str, source_description: str = "claude-mcp", grou
             "group_id": group_id,
         }
 
+        # Surface the silent-failure pattern: entities extracted but no edges.
+        # Without this, agents see ok=true and treat the write as successful,
+        # only to find search_graph returns nothing later. Common causes are
+        # snake_case predicates, pronoun-only subjects, or single-noun fragments.
+        if len(nodes) > 0 and len(edges) == 0:
+            response["warning"] = (
+                "Graphiti extracted entities but no edges from this content, so "
+                "the intent annotation pipeline has nothing to annotate. Common "
+                "causes: snake_case predicates ('name_is' → 'name is'), pronouns "
+                "instead of named subjects ('I am' → 'Kartik is'), or terse "
+                "fragments. See docs/agent_playbook.md format gotchas for working "
+                "patterns. The episode is stored as raw text and reachable via "
+                "get_entity_view(name, mode='episodes')."
+            )
+
         if os.environ.get("COGRAM_FULL_PIPELINE", "false").lower() == "true":
             if _PIPELINE_MODE == "sync":
                 # Inline pipeline (legacy/debug)
@@ -892,11 +912,15 @@ async def add_episode(content: str, source_description: str = "claude-mcp", grou
 async def record_fact(subject: str, predicate: str, object: str, group_id: str = "default") -> str:
     """SPO wrapper around add_episode. Constructs '{subject} {predicate} {object}' and writes — locks edge structure better than free prose.
     When: user states a structural fact ('Siva builds cogram', 'cogram uses Neo4j'). Use add_episode for narrative episodes.
-    Inputs: subject, predicate, object, group_id.
+    Inputs: subject, predicate, object, group_id. Predicate underscores are auto-converted to spaces (`name_is` → `name is`) so snake_case identifiers form readable English the extractor can produce edges from.
     Pair with: get_episode_task(task_id, wait_seconds=20) — same async pipeline as add_episode.
     """
+    # Auto-rephrase: replace underscores in the predicate with spaces. Otherwise
+    # snake_case predicates (`name_is`, `has_experience_in`) form non-English
+    # sentences that graphiti's extractor silently fails to produce edges from.
+    natural_predicate = predicate.replace("_", " ").strip()
     return await add_episode(
-        content=f"{subject} {predicate} {object}",
+        content=f"{subject} {natural_predicate} {object}",
         source_description="claude-fact",
         group_id=group_id,
     )

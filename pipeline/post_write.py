@@ -56,6 +56,7 @@ class PipelineSummary:
     nodes_narrated: int = 0
     profile_distilled: bool = False
     profile_patterns: int = 0
+    profile_skip_reason: str = ""
     knot_synthesis: dict = field(default_factory=dict)
     error: str = ""
     elapsed_ms: float = 0.0
@@ -67,6 +68,7 @@ class PipelineSummary:
             "nodes_narrated": self.nodes_narrated,
             "profile_distilled": self.profile_distilled,
             "profile_patterns": self.profile_patterns,
+            "profile_skip_reason": self.profile_skip_reason,
             "knot_synthesis": self.knot_synthesis,
             "error": self.error,
             "elapsed_ms": round(self.elapsed_ms, 1),
@@ -219,11 +221,27 @@ async def _step_profile(
     try:
         profile_present = await _profile_exists(graphiti, group_id)
         if not _should_redistill(group_id, profile_present, summary.edges_annotated):
-            _profile_distill_counter[group_id] = _profile_distill_counter.get(group_id, 0) + 1
+            counter = _profile_distill_counter.get(group_id, 0)
+            _profile_distill_counter[group_id] = counter + 1
+            if not profile_present and summary.edges_annotated == 0:
+                summary.profile_skip_reason = (
+                    "no annotated edges yet for this group_id — write content "
+                    "that produces edges (see add_episode warning if any) so "
+                    "profile distillation has data to compress"
+                )
+            else:
+                summary.profile_skip_reason = (
+                    f"throttle: {counter + 1}/{PROFILE_REDISTILL_EVERY_N} "
+                    "episodes since last distill"
+                )
             return
 
         edges_data = await _collect_annotated_edges_for_group(graphiti, group_id)
         if not edges_data:
+            summary.profile_skip_reason = (
+                "should-redistill triggered but no eligible edges found "
+                "(filtered by edge_kind ∈ principle/action/unknown and not retracted)"
+            )
             return
 
         profile = await _llm_distill_profile(edges_data, settings, group_id=group_id)

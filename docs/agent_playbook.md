@@ -165,6 +165,73 @@ slug (`mcp_<timestamp>`) that `add_episode` returns. It accepts:
 
 ---
 
+## Format gotchas — what the extractor likes and dislikes
+
+Cogram inherits graphiti's LLM-based extractor. It produces edges from
+inputs that look like natural English with a clear subject-verb-object
+structure. Inputs that don't trigger extraction silently leave the graph
+edge-less — `add_episode` returns ok=true but with `extracted: {edges: 0}`
+and a `warning` field.
+
+### Predicates: natural English verbs, never schema identifiers
+
+| Avoid | Use instead | Why |
+|---|---|---|
+| `name_is` | `is named` or just `name is` | snake_case isn't English; v0.2.2 auto-rephrases this |
+| `has_experience_in` | `has experience in` | same — auto-rephrased now, but be explicit anyway |
+| `uses_database` | `uses` | the predicate alone is the verb |
+| `backend_language` | `is written in` or `uses` | `backend_language` reads as a noun phrase, not a verb |
+| `primary_stack` | `primary stack includes` or `is built with` | needs a verb |
+
+`record_fact` in v0.2.2+ auto-replaces underscores with spaces in the
+predicate, so `record_fact("Kartik", "name_is", "Kartik")` becomes the
+sentence `"Kartik name is Kartik"` and extracts cleanly. But you'll get
+better edges by writing the verb directly.
+
+### Subjects: named entities, never pronouns
+
+| Avoid | Use instead |
+|---|---|
+| `"I am a developer"` | `"Kartik is a developer"` |
+| `"the user prefers..."` | `"Kartik prefers..."` |
+| `"Project uses..."` | `"<actual project name> uses..."` |
+
+Pronouns and role phrases get extracted as separate entities, then never
+merge with the named entity. Always use the canonical name.
+
+### Episode body length
+
+- Single-sentence episodes: works, but produces 1-2 edges max.
+- 2-4 sentence episodes: sweet spot — produces 3-8 edges with rich intent_meta.
+- Single-noun fragments ("Kartik."): no edges; gets stored as raw text only.
+
+### Working write patterns (verified)
+
+```python
+# Good: clear subject + verb + object
+record_fact("Kartik Sharma", "studied", "Computer Science")
+record_fact("Kartik Sharma", "works on", "frontend and backend systems")
+record_fact("Kartik Sharma", "uses", "React and Node.js")
+
+# Better: prose episode that produces multiple edges
+add_episode(
+    "Kartik Sharma is a full-stack developer with 5 years of experience. "
+    "He builds web applications using React for the frontend and Node.js "
+    "with PostgreSQL for the backend. He prefers cost-efficient open-source "
+    "tools and chose graph-shaped storage over vector databases for cogram."
+)
+```
+
+### When you see `warning: "Graphiti extracted entities but no edges..."`
+
+The episode is stored as raw text (reachable via `get_entity_view(name,
+mode="episodes")`) but no graph edges were created, so `search_graph` won't
+hit it. Rewrite with the format gotchas above and re-issue. Don't retract
+the original — it's not wrong, it's just thin. The next write reinforces
+the entity.
+
+---
+
 ## The 14 tools at a glance
 
 | Phase | Tool | Role |
