@@ -349,12 +349,19 @@ class CogramAdapter(Adapter):
 
     async def _annotate_edges(self, meter: CostMeter) -> None:
         try:
-            from cogram.annotate import _annotate_one, EDGES_QUERY, WRITE_QUERY, EPISODES_QUERY
+            from cogram.utils.maintenance.intent_annotation import (
+                _annotate_one,
+                WRITE_QUERY,
+            )
+            from cogram.llm_client.structured import make_structured_client
             from cogram.core.config import Settings
         except ImportError:
             return
         settings = Settings.from_env()
-        client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
+        client = make_structured_client(
+            api_key=settings.small_llm_api_key,
+            base_url=settings.small_llm_base_url,
+        )
         # Pull only this group's un-annotated edges
         async with self.graphiti.driver.session() as session:
             rows = [r.data() async for r in await session.run(
@@ -372,7 +379,9 @@ class CogramAdapter(Adapter):
             )]
         for row in rows:
             try:
-                meta = await _annotate_one(client, settings.annotator_llm_model, row, "")
+                meta = await _annotate_one(
+                    client, settings.small_llm_model, row, "", group_id=self.group_id
+                )
                 async with self.graphiti.driver.session() as s:
                     await s.run(WRITE_QUERY, edge_id=row["edge_id"], meta_json=json.dumps(meta))
             except Exception:

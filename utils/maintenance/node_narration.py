@@ -21,16 +21,34 @@ import time
 from typing import Any, Optional
 
 import httpx
-from openai import AsyncOpenAI
 
 from cogram.core.config import Settings
 from cogram.llm_client.engram import Policy, put as cache_put, _hash
+from cogram.llm_client.structured import NodeNarrative, make_structured_client
 from cogram.utils.rate_limit import acquire as _rate_acquire
 
 
 HUB_DEGREE_THRESHOLD = int(os.environ.get("NARRATOR_HUB_DEGREE", "5"))
 TRAINER_URL = os.environ.get("TRAINER_URL", "http://cogram-trainer:7900")
 USE_T2_IF_AVAILABLE = os.environ.get("NARRATOR_PREFER_T2", "true").lower() == "true"
+
+
+async def _read_entity_cache_version(node_uuid: str) -> int:
+    """Read the per-entity cache version stamp written by retract().
+    Returns 0 if Redis is unreachable or no version exists yet."""
+    try:
+        import redis.asyncio as _r
+        client = _r.from_url(
+            os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+            decode_responses=True,
+        )
+        try:
+            v = await client.get(f"cogram:cache_version:entity:{node_uuid}")
+            return int(v) if v else 0
+        finally:
+            await client.aclose()
+    except Exception:
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -244,23 +262,38 @@ async def narrate(
             narr["_prompt"] = prompt
             return narr
 
-    # T1: cached prompt-orchestration call
-    client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
+    # T1: cached prompt-orchestration call. Narration is a small-tier call
+    # (single-entity summary, ~600 tokens out, fired per hub node).
+    # instructor enforces NodeNarrative as the response shape; the brain
+    # serializes the validated model so the Policy cache stores a stable
+    # JSON string and _parse_narrative continues to work for both T1 and T2.
+    client = make_structured_client(
+        api_key=settings.small_llm_api_key,
+        base_url=settings.small_llm_base_url,
+    )
 
     async def brain(p: str) -> str:
-        await _rate_acquire()
-        resp = await client.chat.completions.create(
-            model=settings.graphiti_llm_model,
+        await _rate_acquire(group_id)
+        narrative: NodeNarrative = await client.chat.completions.create(
+            model=settings.small_llm_model,
             messages=[{"role": "user", "content": p}],
+            response_model=NodeNarrative,
             temperature=0.5,
             max_tokens=800,
         )
-        return (resp.choices[0].message.content or "").strip()
+        return narrative.model_dump_json()
+
+    # Per-entity cache-version stamp: retract() bumps Redis key
+    # cogram:cache_version:entity:{uuid} when this entity's edges change. We
+    # bake the version into the cache_key so post-retract calls miss the
+    # Engram cache and re-narrate against the corrected graph state. Default
+    # 0 if Redis is unreachable — at worst we get the legacy cached prose.
+    cache_version = await _read_entity_cache_version(node_uuid)
 
     policy = Policy(
         name="node_narration",
         brain=brain,
-        cache_key_fn=lambda p: f"{node_uuid}::{_hash('narration', {'p': p[:1000]})[:16]}",
+        cache_key_fn=lambda p: f"{node_uuid}::v{cache_version}::{_hash('narration', {'p': p[:1000]})[:16]}",
     )
     text = await policy(p=prompt)
     narr = _parse_narrative(text, node_name=ctx["name"], source="T1")

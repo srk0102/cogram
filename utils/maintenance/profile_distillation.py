@@ -21,8 +21,6 @@ import json
 import time
 from pathlib import Path
 
-from openai import AsyncOpenAI
-
 from cogram.core.config import Settings, build_graphiti
 from cogram.utils.rate_limit import acquire as _rate_acquire
 
@@ -39,8 +37,14 @@ RETURN a.name AS a, a.uuid AS a_uuid,
 """
 
 COMPRESSION_PROMPT = """You are given every annotated edge from the Director's
-knowledge graph. Each edge has a "why_connected", "director_vision", and
-"cognitive_pattern". Synthesize them into a single profile.
+knowledge graph. Each edge has an "edge_kind", "why_connected",
+"director_vision", and "cognitive_pattern". Synthesize them into a single
+profile.
+
+The edges have already been pre-filtered to remove `context` and `competitor`
+edges (background facts about third-party tools the Director was merely
+referencing). Every edge below reflects the Director's own beliefs
+(edge_kind=principle) or actions (edge_kind=action) — treat them accordingly.
 
 Edges (JSON list):
 {edges}
@@ -51,6 +55,13 @@ Return strict JSON, no markdown:
   "recurring_visions": ["<2-6 distinct goals the Director repeatedly pursues>"],
   "working_style_summary": "<3-5 sentences in second person ('You ...') describing how the Director approaches problems, what they value, what they avoid>"
 }}"""
+
+# Edge kinds that contribute to the Director's profile / cognitive patterns.
+# `context` and `competitor` edges are excluded so background facts about
+# third-party tools the Director is comparing against don't show up as the
+# Director's own beliefs. `unknown` is included because it's the safe default
+# for legacy edges annotated before the edge_kind field existed.
+PROFILE_ELIGIBLE_KINDS = {"principle", "action", "unknown"}
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +185,12 @@ async def main() -> None:
             continue
         if not isinstance(meta, dict):
             continue
+        # Skip edges that are context/competitor (background facts that don't
+        # represent the Director's beliefs). Legacy edges without edge_kind
+        # default to 'unknown' and are kept.
+        edge_kind = (meta.get("edge_kind") or "unknown").strip().lower()
+        if edge_kind not in PROFILE_ELIGIBLE_KINDS:
+            continue
         edges_data.append({
             "a": row["a"],
             "a_uuid": row["a_uuid"],
@@ -191,27 +208,29 @@ async def main() -> None:
 
     print(f"Compressing {len(edges_data)} annotated edges (group={primary_group})...")
 
-    client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
-    await _rate_acquire()
-    resp = await client.chat.completions.create(
-        model=settings.annotator_llm_model,
+    # Profile distillation is a small-tier call (one big prompt, structured JSON out).
+    from cogram.llm_client.structured import (
+        DirectorProfileCompression,
+        make_structured_client,
+    )
+    client = make_structured_client(
+        api_key=settings.small_llm_api_key,
+        base_url=settings.small_llm_base_url,
+    )
+    await _rate_acquire(primary_group)
+    parsed: DirectorProfileCompression = await client.chat.completions.create(
+        model=settings.small_llm_model,
         messages=[{"role": "user", "content": COMPRESSION_PROMPT.format(
             edges=json.dumps([
                 {k: v for k, v in e.items() if k not in ("a_uuid", "b_uuid", "group_id")}
                 for e in edges_data
             ], indent=2),
         )}],
+        response_model=DirectorProfileCompression,
         temperature=0.5,
         max_tokens=8192,
     )
-    msg = resp.choices[0].message
-    text = ((msg.content or "") or (getattr(msg, "reasoning_content", None) or "")).strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-    start, end = text.find("{"), text.rfind("}")
-    profile = json.loads(text[start : end + 1])
+    profile = parsed.model_dump()
 
     # 1. Write JSON for backward compat
     OUTPUT_PATH.write_text(json.dumps(profile, indent=2), encoding="utf-8")

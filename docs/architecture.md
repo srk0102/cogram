@@ -140,6 +140,54 @@ COGRAM_RESYNTHESIS_RATE_CAP_PER_HOUR=5      # per-group fire rate cap
 
 These make worst-case daily cost provably bounded.
 
+## Rate limiting (dual-gate, v0.2+)
+
+Every LLM and embedder call passes through two sliding-window gates in
+[utils/rate_limit.py](../utils/rate_limit.py):
+
+| Gate | Default | Purpose |
+|---|---|---|
+| **Global** | `RATE_LIMIT_PER_MIN=150` | Stays under upstream provider's per-minute quota (OpenAI tier 1, NIM, etc.) |
+| **Per-group** | `RATE_LIMIT_PER_GROUP_PER_MIN=50` | Prevents one busy `group_id` from monopolizing the global pool |
+
+`acquire(group_id)` blocks while EITHER gate is full. The default
+`group_id="default"` keeps zero-arg callers working — they share one
+"default" bucket, which is fine for single-tenant deployments.
+
+Per-group fairness applies to the post-write maintenance modules
+(intent annotation, narration, profile distillation) since they have
+the group_id in scope. Graphiti's extraction call and the contradiction
+classifier currently share the "default" bucket because their wrappers
+don't surface group_id.
+
+To disable per-group fairness (rely on global cap only), set
+`RATE_LIMIT_PER_GROUP_PER_MIN=0`.
+
+The per-group history dict opportunistically purges idle groups
+(no acquire in the last 60s) when it grows past 32 entries, so workloads
+with many short-lived group_ids don't leak memory.
+
+## MCP tool surface (v0.2.1, 14 tools)
+
+Full reference: [docs/agent_playbook.md](agent_playbook.md). The agent's job tree maps cleanly onto a session-start ritual:
+
+| Step | Tool | Role |
+|---|---|---|
+| 1 | `list_groups(query?)` | **First call.** Discover what contexts exist before searching. |
+| 2 | `get_director_profile(group_id)` or `get_unified_profile()` | User's reasoning model — pick a group or merge across all. |
+| 3 | `get_entity_view(name, mode)` | **Primary "what is X" tool.** Modes: `narrative` (default), `edges`, `episodes`, `all`. |
+| 4 | `edges_by_pattern(pattern)` | Cross-decision routing — surfaces every prior decision under one cognitive pattern. |
+| 5 | `search_graph(query, group_id)` | General semantic lookup. Profile-aware on subjective queries. |
+| W | `add_episode` / `record_fact` | Write tools. Return a `task_id` you can wait on. |
+| W+ | `get_episode_task(task_id, wait_seconds=N)` | Block until annotations settle before reading the graph. |
+
+Five tools were trimmed from the v0.1 surface (19 → 14) in v0.2.1:
+
+- **`find_connections`, `get_node_narrative`, `recent_episodes`** — merged into one `get_entity_view(name, mode)`. All three answered the same question shape (*"tell me about entity X"*) from different angles, which made tool selection harder than the work warranted. Now one tool, one entity-name input, mode picks the angle.
+- **`get_knot`** — knot synthesis runs unreliably under current rate-cap + timeout interactions; agents calling `get_knot` first got an empty hint ~95% of the time. Use `get_entity_view(name)` instead. The synthesizer still runs in the background pipeline; it just isn't exposed as an agent tool yet.
+- **`dedup_patterns`** — operator-grade maintenance, not agent-grade. Triggering bulk embedding calls during a chat session can merge pattern names across in-flight conversations. Now CLI-only: `python -m cogram.utils.maintenance.pattern_dedup`.
+- **`confidence`** — decay-weighted scores are internal infrastructure. Agents need *"is this still believed"*, which `search_graph` already filters via retraction.
+
 ## Backward compatibility
 
 - `Graphiti = Cogram` aliased at module level — `from cogram import Graphiti` keeps working

@@ -238,23 +238,23 @@ Edit `claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. Cogram tools appear:
+Restart Claude Desktop. Cogram exposes **14 MCP tools** — full routing reference at [docs/agent_playbook.md](docs/agent_playbook.md). Headline ones:
 
 | Tool | Purpose |
 |---|---|
-| `add_episode(content, group_id)` | Write a fact; pipeline fires async |
-| `record_fact(subject, predicate, object)` | Atomic SPO fact for foundational principles |
-| `search_graph(query, group_id)` | Profile-aware retrieval, Redis-cached |
-| `find_connections(entity_name)` | All edges touching an entity |
-| `recent_episodes(entity_name, n)` | Recent episodes mentioning an entity |
+| `list_groups()` | **First call.** Discover what contexts exist |
+| `add_episode(content, group_id)` | Write prose; pipeline fires async, returns `task_id` |
+| `record_fact(subject, predicate, object)` | SPO fact for clean structural writes |
+| `get_entity_view(name, mode)` | **Primary "what is X" tool.** Modes: `narrative` (default), `edges`, `episodes`, `all` |
+| `search_graph(query, group_id)` | Profile-aware semantic search, Redis hot-tier cached |
+| `edges_by_pattern(pattern)` | **Cross-decision routing.** Every prior decision under one cognitive pattern |
+| `get_director_profile(group_id)` | DirectorProfile + top patterns + per-pattern WHY examples |
+| `get_unified_profile()` | Cross-group merged profile with `appears_in_groups` |
+| `list_cognitive_patterns(query?)` | Distinct cognitive patterns + edge counts |
+| `retract(target, reason)` | Mark fact wrong; cascades through profile + bumps narrative cache version |
 | `get_episode(uuid)` | Full content of one episode |
-| `get_director_profile(group_id)` | DirectorProfile + cognitive patterns + per-pattern WHY examples |
-| `get_unified_profile()` | Cross-group merged profile |
-| `get_knot(entity_name, format)` | Pre-synthesized hub narrative + raw subgraph |
-| `list_cognitive_patterns(group_id)` | Distinct cognitive patterns + edge counts |
-| `confidence(entity_name)` | Decayed effective confidence + label |
-| `retract(target, reason)` | Mark fact wrong; cascades through profile + caches |
-| `dedup_patterns(group_id)` | Embed + merge near-duplicate cognitive patterns |
+| `get_episode_task(task_id, wait_seconds)` | Wait for / peek at the async post-write pipeline |
+| `list_episode_tasks` / `cancel_episode_task` | Manage in-flight pipeline tasks |
 
 ---
 
@@ -338,9 +338,52 @@ cogram = Cogram(graph_driver=driver)
 
 ## Using Cogram with different LLM providers
 
+Cogram exposes three independently-configurable LLM tiers — pick the model and endpoint for each one separately. Full reference: [docs/llm_calls.md](docs/llm_calls.md).
+
+| Tier | What it powers | Default | Tunable env vars |
+|---|---|---|---|
+| **LARGE** | Graphiti's entity/edge extraction (heavy multi-shot call) | `gpt-4o-mini` | `LARGE_LLM_MODEL`, `LARGE_LLM_API_KEY`, `LARGE_LLM_BASE_URL` |
+| **SMALL** | Intent annotation, node narration, profile distillation, contradiction classifier | `gpt-4o-mini` | `SMALL_LLM_MODEL`, `SMALL_LLM_API_KEY`, `SMALL_LLM_BASE_URL` |
+| **EMBEDDER** | Embeddings (entities, edges, episodes, narratives) | `text-embedding-3-small` | `EMBEDDER_MODEL`, `EMBEDDER_API_KEY`, `EMBEDDER_BASE_URL` |
+
+Each tier falls back to `OPENAI_API_KEY` + `OPENAI_BASE_URL` when its own key/url is unset, so single-provider setups stay one-line.
+
 ### OpenAI (default)
 
-Set `OPENAI_API_KEY` in `.env`. Cogram defaults to `gpt-4o-mini` for extraction, intent annotation, narration, and profile distillation.
+Set `OPENAI_API_KEY` in `.env`. Defaults to `gpt-4o-mini` everywhere. No other config needed.
+
+### Cost-optimized: extraction on OpenAI, pipeline on DeepSeek
+
+```env
+LARGE_LLM_MODEL=gpt-4o
+LARGE_LLM_API_KEY=sk-openai-...
+
+SMALL_LLM_MODEL=deepseek-chat
+SMALL_LLM_API_KEY=sk-deepseek-...
+SMALL_LLM_BASE_URL=https://api.deepseek.com/v1
+
+EMBEDDER_MODEL=text-embedding-3-small
+EMBEDDER_API_KEY=sk-openai-...
+```
+
+Cuts post-write pipeline cost by ~10× while preserving extraction quality.
+
+### Fully local: Ollama for everything
+
+```env
+SMALL_LLM_MODEL=qwen2.5:7b
+SMALL_LLM_API_KEY=ollama
+SMALL_LLM_BASE_URL=http://host.docker.internal:11434/v1
+
+LARGE_LLM_MODEL=qwen2.5:14b
+LARGE_LLM_API_KEY=ollama
+LARGE_LLM_BASE_URL=http://host.docker.internal:11434/v1
+
+GEMMA_BASE_URL=http://host.docker.internal:11434/v1
+GEMMA_MODEL=gemma3n:e4b
+```
+
+Embeddings still need a remote provider — Ollama embedding models work but are noticeably weaker for graph search. Most users keep `EMBEDDER_*` on OpenAI.
 
 ### Local Gemma via Ollama (recommended for knot synthesis)
 
@@ -348,13 +391,33 @@ Set `OPENAI_API_KEY` in `.env`. Cogram defaults to `gpt-4o-mini` for extraction,
 ollama pull gemma3n:e4b
 ```
 
-In `.env`:
-```bash
+```env
 GEMMA_BASE_URL=http://host.docker.internal:11434/v1
 GEMMA_MODEL=gemma3n:e4b
 ```
 
-Cogram uses Gemma for hub narrative synthesis only. All other LLM calls stay on OpenAI for structured-output reliability. Falls back to `gpt-4o-mini` if Ollama unreachable.
+Cogram uses Gemma for hub narrative synthesis only. Falls back to `gpt-4o-mini` if Ollama unreachable.
+
+### Anthropic / Gemini / Groq via custom client
+
+Cogram inherits Graphiti's multi-provider support. Set the appropriate API key and pass an alternate `LLMClient` to the `Cogram` constructor:
+
+```python
+from cogram import Cogram
+from cogram.llm_client.anthropic_client import AnthropicClient, LLMConfig
+
+cogram = Cogram(
+    "bolt://localhost:7687", "neo4j", "password",
+    llm_client=AnthropicClient(config=LLMConfig(
+        api_key="<your-anthropic-key>",
+        model="claude-sonnet-4-5-latest",
+    )),
+)
+```
+
+> **Backward compat**
+>
+> v0.1 env vars (`GRAPHITI_LLM_MODEL`, `ANNOTATOR_LLM_MODEL`, `EMBEDDING_MODEL`) still work as fallbacks for the new tiered names. Existing `.env` files keep working unchanged.
 
 ### Anthropic / Gemini / Groq
 
@@ -449,15 +512,32 @@ For deep architectural details — the five LLM call types, the three storage ti
 - Async pipeline fires on every `add_episode` (~3s MCP latency, ~15s background)
 - Engram cache + Redis active subgraph wired and active
 - Knot detection + Gemma synthesis with `gpt-4o-mini` fallback
-- All 13 MCP tools functional
+- 14 MCP tools functional (11 graph tools + 3 episode-task tools) — see [docs/agent_playbook.md](docs/agent_playbook.md)
 - Public Docker images on ghcr.io, anonymous pull works
 
 **Known limitations:**
-- LLM annotator can confuse "context" with "user intent" on edges that mention competitors. Mitigation: use `record_fact` for foundational principles to lock the SPO structure.
 - Trainer container (T2 LoRA per-node adapters) is opt-in via `docker compose --profile training up`, deferred until ≥50 samples per node.
+- Task registry is process-local in-memory; horizontal scale-out needs sticky routing per group_id.
 
-**Roadmap (v0.2):**
-- `edge_kind` field in `intent_meta` to distinguish principle / action / context / competitor edges
+**Resolved in v0.2:**
+- ~~LLM annotator can confuse "context" with "user intent" on edges that mention competitors.~~ Three-layer fix: (1) the `edge_kind` taxonomy classifies every edge as `principle` / `action` / `context` / `competitor` / `unknown`, (2) profile distillation filters out `context` and `competitor` edges so they can't reinforce cognitive patterns, (3) `instructor` + a Pydantic `Literal` field rejects malformed `edge_kind` at parse time and auto-retries with the validation error fed back into the prompt. Live verified: a sentence mentioning "Mem0 uses Qdrant for embeddings" classifies as `competitor` with empty `director_vision` / `cognitive_pattern`. Full write-up: [docs/annotator_flaw.md](docs/annotator_flaw.md).
+
+**Shipped in v0.2:**
+- `edge_kind` field in `intent_meta` (`principle` / `action` / `context` / `competitor` / `unknown`) — see [docs/annotator_flaw.md](docs/annotator_flaw.md)
+- Background pipeline task registry + 3 new MCP tools: `list_episode_tasks`, `get_episode_task(task_id, wait_seconds=0)`, `cancel_episode_task`
+- Tiered LLM model split (`LARGE_LLM_*` / `SMALL_LLM_*` / `EMBEDDER_*` env vars) — see [docs/llm_calls.md](docs/llm_calls.md)
+- `instructor` + Pydantic for the 4 post-write LLM calls — typed responses, auto-retry on parse failure
+- Per-group rate-limit gate (`RATE_LIMIT_PER_GROUP_PER_MIN`) so one busy group can't starve others
+- **Knot synthesis runs outside the 120s pipeline timeout** — was getting starved on bigger writes; now fires unbounded with its own rate-cap + delta-gate
+- **Retract bumps per-entity cache version** so node narratives re-generate against the corrected graph (was serving stale prose)
+- **Tool surface trimmed from 19→14:** dropped `get_knot` (synthesis not reliable enough yet to expose), `dedup_patterns` (operator-grade — now CLI-only), `confidence` (decay scores were infrastructure leaking into the agent surface), and merged `find_connections` + `get_node_narrative` + `recent_episodes` into one `get_entity_view(name, mode)` since all three answered the same *"tell me about entity X"* question shape. The dropped functions stay callable from internal code; the merged ones now live as modes of the single tool.
+- **Standalone agent playbook** at [docs/agent_playbook.md](docs/agent_playbook.md) — session-start, decision-time, lookup, write, and retract rituals on one page.
+- All 16 remaining tool descriptions rewritten to 4-line format with explicit `Pair with:` routing hints — total doc tokens cut ~60%
+
+**Roadmap (v0.3+):**
+- Opt-in MCP tool to backfill `edge_kind` on legacy edges with a before/after diff of cognitive patterns
+- Weighted distillation (instead of filtering): `principle=1.0`, `action=0.7`, `unknown=0.3`, `context/competitor=0.0`
+- Entity-level `is_director_owned` flag so the annotator distinguishes Director's own products from external tools
 - Inline cogram value-add deeper into graphiti's hot-path functions
 - T2 LoRA training activation
 - REST API for non-MCP clients

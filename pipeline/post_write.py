@@ -79,10 +79,10 @@ class PipelineSummary:
 # ---------------------------------------------------------------------------
 
 async def _step_annotate(
-    graphiti, episode_uuid: str, settings: Settings, summary: PipelineSummary
+    graphiti, episode_uuid: str, group_id: str, settings: Settings, summary: PipelineSummary
 ) -> None:
     try:
-        count = await annotate_edges_for_episode(graphiti, episode_uuid, settings)
+        count = await annotate_edges_for_episode(graphiti, episode_uuid, settings, group_id=group_id)
         summary.edges_annotated = count
     except Exception as exc:
         summary.skipped.append(f"annotate: {exc}")
@@ -135,7 +135,12 @@ def _should_redistill(group_id: str, profile_present: bool, edges_annotated: int
 
 async def _collect_annotated_edges_for_group(graphiti, group_id: str) -> list[dict]:
     """Same shape as profile.main() COLLECT_QUERY but filtered by group_id.
-    Excludes retracted edges so the distilled profile reflects current beliefs."""
+    Excludes retracted edges so the distilled profile reflects current beliefs.
+    Also filters out edges whose edge_kind is `context` or `competitor` so
+    background facts about third-party tools don't pollute the Director profile
+    (see docs/annotator_flaw.md for why)."""
+    from cogram.utils.maintenance.profile_distillation import PROFILE_ELIGIBLE_KINDS
+
     cypher = """
     MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)
     WHERE r.intent_meta IS NOT NULL
@@ -158,6 +163,11 @@ async def _collect_annotated_edges_for_group(graphiti, group_id: str) -> list[di
             continue
         if not isinstance(meta, dict):
             continue
+        # edge_kind filter: skip context/competitor edges (legacy edges without
+        # the field default to 'unknown' and remain eligible).
+        edge_kind = (meta.get("edge_kind") or "unknown").strip().lower()
+        if edge_kind not in PROFILE_ELIGIBLE_KINDS:
+            continue
         edges_data.append({
             "a": row["a"],
             "a_uuid": row["a_uuid"],
@@ -170,32 +180,34 @@ async def _collect_annotated_edges_for_group(graphiti, group_id: str) -> list[di
     return edges_data
 
 
-async def _llm_distill_profile(edges_data: list[dict], settings: Settings) -> dict:
-    from openai import AsyncOpenAI
+async def _llm_distill_profile(
+    edges_data: list[dict], settings: Settings, group_id: str = "default"
+) -> dict:
+    from cogram.llm_client.structured import (
+        DirectorProfileCompression,
+        make_structured_client,
+    )
 
-    client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
-    await _rate_acquire()
-    resp = await client.chat.completions.create(
-        model=settings.annotator_llm_model,
+    # Profile compression is a small-tier call. instructor enforces the
+    # DirectorProfileCompression shape and auto-retries on parse failure.
+    client = make_structured_client(
+        api_key=settings.small_llm_api_key,
+        base_url=settings.small_llm_base_url,
+    )
+    await _rate_acquire(group_id)
+    profile: DirectorProfileCompression = await client.chat.completions.create(
+        model=settings.small_llm_model,
         messages=[{"role": "user", "content": COMPRESSION_PROMPT.format(
             edges=json.dumps([
                 {k: v for k, v in e.items() if k not in ("a_uuid", "b_uuid", "group_id")}
                 for e in edges_data
             ], indent=2),
         )}],
+        response_model=DirectorProfileCompression,
         temperature=0.5,
         max_tokens=4096,
     )
-    msg = resp.choices[0].message
-    text = ((msg.content or "") or (getattr(msg, "reasoning_content", None) or "")).strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        return {"working_style_summary": "", "recurring_visions": [], "cognitive_patterns": []}
-    return json.loads(text[start : end + 1])
+    return profile.model_dump()
 
 
 async def _step_profile(
@@ -214,7 +226,7 @@ async def _step_profile(
         if not edges_data:
             return
 
-        profile = await _llm_distill_profile(edges_data, settings)
+        profile = await _llm_distill_profile(edges_data, settings, group_id=group_id)
         counts = await upsert_profile_to_graph(graphiti, profile, edges_data, group_id)
         summary.profile_distilled = True
         summary.profile_patterns = counts.get("patterns", 0)
@@ -254,30 +266,37 @@ async def cogram_post_write(
     started = time.time()
     summary = PipelineSummary()
 
-    async def _run() -> None:
-        episode_uuid = getattr(episode_result.episode, "uuid", None)
-        node_uuids = [getattr(n, "uuid", None) for n in (episode_result.nodes or [])]
-        node_uuids = [u for u in node_uuids if u]
+    episode_uuid = getattr(episode_result.episode, "uuid", None)
+    node_uuids = [getattr(n, "uuid", None) for n in (episode_result.nodes or [])]
+    node_uuids = [u for u in node_uuids if u]
 
+    async def _run_main() -> None:
+        """Annotate + narrate + profile under the pipeline timeout. These
+        block the agent's wait_for_episode_task — bound them strictly."""
         if episode_uuid:
-            await _step_annotate(graphiti, episode_uuid, settings, summary)
+            await _step_annotate(graphiti, episode_uuid, group_id, settings, summary)
         await _step_narrate(graphiti, node_uuids, group_id, settings, summary)
         await _step_profile(graphiti, group_id, settings, summary)
 
-        # Knot synthesis (programmatic detection + Gemma synthesis, rate-limited).
-        try:
-            from cogram.utils.maintenance.knot_synthesis import evaluate_knots
-            knot_summary = await evaluate_knots(graphiti, group_id)
-            summary.knot_synthesis = knot_summary
-        except Exception as exc:
-            summary.skipped.append(f"knots: {exc}")
-
     try:
-        await asyncio.wait_for(_run(), timeout=PIPELINE_TIMEOUT_SECONDS)
+        await asyncio.wait_for(_run_main(), timeout=PIPELINE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
-        summary.error = f"timeout after {PIPELINE_TIMEOUT_SECONDS}s"
+        summary.error = f"main pipeline timeout after {PIPELINE_TIMEOUT_SECONDS}s"
     except Exception as exc:
         summary.error = str(exc)
+
+    # Knot synthesis runs OUTSIDE the timeout: it has its own rate-cap
+    # (RESYNTHESIS_RATE_CAP_PER_HOUR=5/group) and delta-gate (RESYNTHESIS_DELTA=3.0),
+    # so it's already self-bounded. Putting it inside the wait_for caused the
+    # 17-entity-episode failure mode where annotate+narrate ate the full budget
+    # and knots never ran. Worst-case it adds ~30s to background pipeline time
+    # on bigger writes; that's fine — add_episode already returned in ~3s.
+    try:
+        from cogram.utils.maintenance.knot_synthesis import evaluate_knots
+        knot_summary = await evaluate_knots(graphiti, group_id)
+        summary.knot_synthesis = knot_summary
+    except Exception as exc:
+        summary.skipped.append(f"knots: {exc}")
 
     # Invalidate Redis active_memory subgraph for this group so the next
     # search_graph re-pulls from Neo4j and includes the new writes.
