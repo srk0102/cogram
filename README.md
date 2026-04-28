@@ -238,23 +238,23 @@ Edit `claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. Cogram tools appear:
+Restart Claude Desktop. Cogram exposes **14 MCP tools** — full routing reference at [docs/agent_playbook.md](docs/agent_playbook.md). Headline ones:
 
 | Tool | Purpose |
 |---|---|
-| `add_episode(content, group_id)` | Write a fact; pipeline fires async |
-| `record_fact(subject, predicate, object)` | Atomic SPO fact for foundational principles |
-| `search_graph(query, group_id)` | Profile-aware retrieval, Redis-cached |
-| `find_connections(entity_name)` | All edges touching an entity |
-| `recent_episodes(entity_name, n)` | Recent episodes mentioning an entity |
+| `list_groups()` | **First call.** Discover what contexts exist |
+| `add_episode(content, group_id)` | Write prose; pipeline fires async, returns `task_id` |
+| `record_fact(subject, predicate, object)` | SPO fact for clean structural writes |
+| `get_entity_view(name, mode)` | **Primary "what is X" tool.** Modes: `narrative` (default), `edges`, `episodes`, `all` |
+| `search_graph(query, group_id)` | Profile-aware semantic search, Redis hot-tier cached |
+| `edges_by_pattern(pattern)` | **Cross-decision routing.** Every prior decision under one cognitive pattern |
+| `get_director_profile(group_id)` | DirectorProfile + top patterns + per-pattern WHY examples |
+| `get_unified_profile()` | Cross-group merged profile with `appears_in_groups` |
+| `list_cognitive_patterns(query?)` | Distinct cognitive patterns + edge counts |
+| `retract(target, reason)` | Mark fact wrong; cascades through profile + bumps narrative cache version |
 | `get_episode(uuid)` | Full content of one episode |
-| `get_director_profile(group_id)` | DirectorProfile + cognitive patterns + per-pattern WHY examples |
-| `get_unified_profile()` | Cross-group merged profile |
-| `get_knot(entity_name, format)` | Pre-synthesized hub narrative + raw subgraph |
-| `list_cognitive_patterns(group_id)` | Distinct cognitive patterns + edge counts |
-| `confidence(entity_name)` | Decayed effective confidence + label |
-| `retract(target, reason)` | Mark fact wrong; cascades through profile + caches |
-| `dedup_patterns(group_id)` | Embed + merge near-duplicate cognitive patterns |
+| `get_episode_task(task_id, wait_seconds)` | Wait for / peek at the async post-write pipeline |
+| `list_episode_tasks` / `cancel_episode_task` | Manage in-flight pipeline tasks |
 
 ---
 
@@ -512,7 +512,7 @@ For deep architectural details — the five LLM call types, the three storage ti
 - Async pipeline fires on every `add_episode` (~3s MCP latency, ~15s background)
 - Engram cache + Redis active subgraph wired and active
 - Knot detection + Gemma synthesis with `gpt-4o-mini` fallback
-- 16 MCP tools functional (13 graph tools + 3 episode-task tools)
+- 14 MCP tools functional (11 graph tools + 3 episode-task tools) — see [docs/agent_playbook.md](docs/agent_playbook.md)
 - Public Docker images on ghcr.io, anonymous pull works
 
 **Known limitations:**
@@ -530,7 +530,8 @@ For deep architectural details — the five LLM call types, the three storage ti
 - Per-group rate-limit gate (`RATE_LIMIT_PER_GROUP_PER_MIN`) so one busy group can't starve others
 - **Knot synthesis runs outside the 120s pipeline timeout** — was getting starved on bigger writes; now fires unbounded with its own rate-cap + delta-gate
 - **Retract bumps per-entity cache version** so node narratives re-generate against the corrected graph (was serving stale prose)
-- **Tool surface trimmed from 19→16:** dropped `get_knot` (knot synthesis isn't reliable enough yet to expose; use `get_node_narrative` instead), `dedup_patterns` (operator-grade — now CLI-only via `python -m cogram.utils.maintenance.pattern_dedup`), `confidence` (decay scores were infrastructure leaking into the agent surface). All three underlying functions still callable from internal code.
+- **Tool surface trimmed from 19→14:** dropped `get_knot` (synthesis not reliable enough yet to expose), `dedup_patterns` (operator-grade — now CLI-only), `confidence` (decay scores were infrastructure leaking into the agent surface), and merged `find_connections` + `get_node_narrative` + `recent_episodes` into one `get_entity_view(name, mode)` since all three answered the same *"tell me about entity X"* question shape. The dropped functions stay callable from internal code; the merged ones now live as modes of the single tool.
+- **Standalone agent playbook** at [docs/agent_playbook.md](docs/agent_playbook.md) — session-start, decision-time, lookup, write, and retract rituals on one page.
 - All 16 remaining tool descriptions rewritten to 4-line format with explicit `Pair with:` routing hints — total doc tokens cut ~60%
 
 **Roadmap (v0.3+):**

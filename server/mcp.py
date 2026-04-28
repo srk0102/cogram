@@ -347,7 +347,7 @@ async def search_graph(query: str, limit: int = 10, group_id: str = "default") -
     """Semantic search across all edges. Profile-aware on subjective queries ('would I...', 'how do I feel...'). Hot-tier (Redis) accelerated — <1ms after first warm. Filters retracted edges automatically.
     When: fuzzy concept lookup or 'find anything related to X'.
     Inputs: query (any text), group_id (required — list_groups first), limit.
-    Pair with: find_connections when you have a known entity name. Pair with get_director_profile when query is subjective.
+    Pair with: get_entity_view(name, mode='edges') when you have a known entity name. Pair with get_director_profile when query is subjective.
     """
     g = _g()
     response: dict = {}
@@ -466,31 +466,8 @@ async def search_graph(query: str, limit: int = 10, group_id: str = "default") -
     return json.dumps(response, indent=2, default=str)
 
 
-@mcp.tool()
-async def find_connections(entity_name: str, limit: int = 25) -> str:
-    """List every edge connected to one entity by name (case-insensitive substring). Includes intent_meta + retract status — raw edge dump.
-    When: known entity name, want all directly-attached facts. Audit/fallback when narratives feel stale.
-    Inputs: entity_name (substring), limit.
-    Pair with: get_node_narrative for the compressed view; this for raw edges.
-    """
-    g = _g()
-    cypher = """
-    MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)
-    WHERE toLower(a.name) CONTAINS toLower($q) OR toLower(b.name) CONTAINS toLower($q)
-    RETURN a.name AS a, b.name AS b,
-           coalesce(r.fact, r.name, '') AS fact,
-           r.intent_meta AS intent_meta
-    LIMIT $limit
-    """
-    async with g.driver.session() as session:
-        rows = [r.data() async for r in await session.run(cypher, q=entity_name, limit=limit)]
-    out = []
-    for r in rows:
-        out.append({
-            "a": r["a"], "b": r["b"], "fact": r["fact"],
-            "intent_meta": _parse_json(r.get("intent_meta")),
-        })
-    return json.dumps(out, indent=2, default=str)
+# NOTE: `find_connections` was merged into `get_entity_view(name, mode="edges")` in v0.2.1.
+# Kept its query body inline below as part of the merged tool.
 
 
 @mcp.tool()
@@ -632,30 +609,44 @@ async def edges_by_pattern(pattern: str, limit: int = 25) -> str:
 # NEW tools (Phase 7)
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-async def get_node_narrative(entity_name: str) -> str:
-    """**Primary 'what is X' tool.** 2-4 sentence narrative per matching entity, with stance, open_questions, cognitive_pattern_label, and confidence-decay. Up to 5 hits (substring match).
-    When: agent wants the compressed view of an entity before deeper retrieval.
-    Inputs: entity_name (substring).
-    Pair with: find_connections for raw edges; recent_episodes for what was just said about it.
-    """
-    g = _g()
-    cypher = """
-    MATCH (n:Entity)
-    WHERE toLower(n.name) CONTAINS toLower($q)
-    RETURN
-        n.uuid AS uuid,
-        n.name AS name,
-        coalesce(n.summary, '') AS summary,
-        n.vllm_narrative AS narrative,
-        coalesce(n.vllm_confidence, 0.0) AS confidence,
-        coalesce(n.vllm_last_reinforced, 0.0) AS last_reinforced
-    LIMIT 5
-    """
+_ENTITY_NARRATIVE_CYPHER = """
+MATCH (n:Entity)
+WHERE toLower(n.name) CONTAINS toLower($q)
+RETURN
+    n.uuid AS uuid,
+    n.name AS name,
+    coalesce(n.summary, '') AS summary,
+    n.vllm_narrative AS narrative,
+    coalesce(n.vllm_confidence, 0.0) AS confidence,
+    coalesce(n.vllm_last_reinforced, 0.0) AS last_reinforced
+LIMIT 5
+"""
+
+_ENTITY_EDGES_CYPHER = """
+MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)
+WHERE toLower(a.name) CONTAINS toLower($q) OR toLower(b.name) CONTAINS toLower($q)
+RETURN a.name AS a, b.name AS b,
+       coalesce(r.fact, r.name, '') AS fact,
+       r.intent_meta AS intent_meta
+LIMIT $limit
+"""
+
+_ENTITY_EPISODES_CYPHER = """
+MATCH (e:Episodic)-[:MENTIONS]->(n:Entity)
+WHERE toLower(n.name) CONTAINS toLower($q)
+RETURN
+    e.uuid AS uuid,
+    coalesce(e.name, '') AS name,
+    coalesce(e.content, '') AS content,
+    coalesce(e.valid_at, e.created_at) AS ts
+ORDER BY coalesce(e.valid_at, e.created_at) DESC
+LIMIT $n
+"""
+
+
+async def _entity_narrative_view(g, entity_name: str) -> list[dict]:
     async with g.driver.session() as session:
-        rows = [r.data() async for r in await session.run(cypher, q=entity_name)]
-    if not rows:
-        return f"No entity matches '{entity_name}'."
+        rows = [r.data() async for r in await session.run(_ENTITY_NARRATIVE_CYPHER, q=entity_name)]
     out = []
     for r in rows:
         narr = _parse_json(r["narrative"])
@@ -670,46 +661,97 @@ async def get_node_narrative(entity_name: str) -> str:
             ), 3) if r["last_reinforced"] else 0.0,
             "confidence_label": label_for(effective_confidence(r["confidence"], r["last_reinforced"])) if r["last_reinforced"] else "stale",
         })
-    return json.dumps(out, indent=2, default=str)
+    return out
+
+
+async def _entity_edges_view(g, entity_name: str, limit: int) -> list[dict]:
+    async with g.driver.session() as session:
+        rows = [r.data() async for r in await session.run(_ENTITY_EDGES_CYPHER, q=entity_name, limit=limit)]
+    return [
+        {
+            "a": r["a"], "b": r["b"], "fact": r["fact"],
+            "intent_meta": _parse_json(r.get("intent_meta")),
+        }
+        for r in rows
+    ]
+
+
+async def _entity_episodes_view(g, entity_name: str, n: int) -> list[dict]:
+    async with g.driver.session() as session:
+        rows = [r.data() async for r in await session.run(_ENTITY_EPISODES_CYPHER, q=entity_name, n=n)]
+    return [
+        {
+            "uuid": r["uuid"],
+            "name": r["name"],
+            "content_excerpt": (r["content"] or "")[:600],
+            "timestamp": r["ts"],
+        }
+        for r in rows
+    ]
 
 
 @mcp.tool()
-async def recent_episodes(entity_name: str, n: int = 5) -> str:
-    """Most recent N episodic events that mention this entity. Returns episode uuid + content excerpt + timestamp.
-    When: 'what was the user just talking about regarding X' or to find episode uuids for retract.
-    Inputs: entity_name (substring), n (default 5).
-    Pair with: get_episode(uuid) for the full body of any episode in the result.
+async def get_entity_view(
+    entity_name: str,
+    mode: str = "narrative",
+    limit: int = 25,
+) -> str:
+    """**Primary 'tell me about X' tool.** Three layers of view selectable via `mode`. Substring match on entity_name (up to 5 entities for narrative; up to `limit` edges/episodes).
+    When: any time you have a known entity name and want context — narrative for compressed view, edges for raw provenance, episodes to find uuids for retract, all for everything at once.
+    Inputs: entity_name (substring); mode ∈ 'narrative' (default) | 'edges' | 'episodes' | 'all'; limit (caps edges + episodes; narrative is always max 5).
+    Pair with: edges_by_pattern for cross-decision routing; search_graph for fuzzy semantic lookup; retract(target=uuid) using uuids from mode='episodes'.
     """
     g = _g()
-    cypher = """
-    MATCH (e:Episodic)-[:MENTIONS]->(n:Entity)
-    WHERE toLower(n.name) CONTAINS toLower($q)
-    RETURN
-        e.uuid AS uuid,
-        coalesce(e.name, '') AS name,
-        coalesce(e.content, '') AS content,
-        coalesce(e.valid_at, e.created_at) AS ts
-    ORDER BY coalesce(e.valid_at, e.created_at) DESC
-    LIMIT $n
-    """
-    async with g.driver.session() as session:
-        rows = [r.data() async for r in await session.run(cypher, q=entity_name, n=n)]
-    if not rows:
-        return f"No episodes mention '{entity_name}'."
-    return json.dumps([{
-        "uuid": r["uuid"],
-        "name": r["name"],
-        "content_excerpt": (r["content"] or "")[:600],
-        "timestamp": r["ts"],
-    } for r in rows], indent=2, default=str)
+    mode_l = (mode or "narrative").strip().lower()
+    if mode_l not in {"narrative", "edges", "episodes", "all"}:
+        return json.dumps({
+            "ok": False,
+            "error": f"unknown mode {mode!r}; expected narrative|edges|episodes|all",
+        }, indent=2)
+
+    n_episodes = max(1, min(int(limit or 25), 50))
+
+    if mode_l == "narrative":
+        rows = await _entity_narrative_view(g, entity_name)
+        if not rows:
+            return f"No entity matches '{entity_name}'."
+        return json.dumps(rows, indent=2, default=str)
+
+    if mode_l == "edges":
+        rows = await _entity_edges_view(g, entity_name, limit=limit)
+        if not rows:
+            return f"No edges connected to '{entity_name}'."
+        return json.dumps(rows, indent=2, default=str)
+
+    if mode_l == "episodes":
+        rows = await _entity_episodes_view(g, entity_name, n=n_episodes)
+        if not rows:
+            return f"No episodes mention '{entity_name}'."
+        return json.dumps(rows, indent=2, default=str)
+
+    # mode == "all"
+    narrative = await _entity_narrative_view(g, entity_name)
+    edges = await _entity_edges_view(g, entity_name, limit=limit)
+    episodes = await _entity_episodes_view(g, entity_name, n=n_episodes)
+    return json.dumps({
+        "entity_name": entity_name,
+        "narrative": narrative,
+        "edges": edges,
+        "episodes": episodes,
+    }, indent=2, default=str)
+
+
+# NOTE: `get_node_narrative` and `recent_episodes` were merged into
+# `get_entity_view(name, mode=...)` in v0.2.1. Use mode='narrative' (default)
+# for narratives and mode='episodes' for episode excerpts.
 
 
 @mcp.tool()
 async def get_episode(uuid: str) -> str:
     """Full content of one episode by uuid.
-    When: drilling into episode bodies after an edge or recent_episodes returns a uuid.
+    When: drilling into episode bodies after get_entity_view(name, mode='episodes') returns a uuid.
     Inputs: uuid (the EPISODIC uuid — NOT the friendly `episode_name` like 'mcp_<ts>' that add_episode returns).
-    Pair with: recent_episodes/find_connections to find uuids; retract(target=uuid) to roll back facts from this episode.
+    Pair with: get_entity_view(name, mode='episodes') to find uuids; retract(target=uuid) to roll back facts from this episode.
     """
     g = _g()
     cypher = """
@@ -1073,8 +1115,8 @@ async def get_unified_profile(top_patterns: int = 15, examples_per_pattern: int 
 async def retract(target: str, reason: str = "") -> str:
     """Mark fact(s) as no-longer-believed. Filtered from search_graph; kept on disk for audit; bumps cache version so narratives re-generate on next read.
     When: user says 'that's wrong', 'I never said that', or you find an annotator hallucination.
-    Inputs: target accepts (a) Entity name, (b) edge uuid, (c) Episodic uuid — NOT the friendly `episode_name` 'mcp_<ts>' from add_episode (use get_episode/recent_episodes first to find the uuid).
-    Pair with: precede with find_connections(entity) to verify what you'll retract.
+    Inputs: target accepts (a) Entity name, (b) edge uuid, (c) Episodic uuid — NOT the friendly `episode_name` 'mcp_<ts>' from add_episode (use get_entity_view(name, mode='episodes') or get_episode first to find the uuid).
+    Pair with: precede with get_entity_view(name, mode='edges') to verify what you'll retract.
     """
     g = _g()
     now = time.time()

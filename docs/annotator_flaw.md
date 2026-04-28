@@ -99,7 +99,7 @@ Definitions:
    searchable, but they don't reinforce the Director's self-model.
 
 4. **Search & traversal** — unchanged for v0.2. Context/competitor edges
-   are still returned by `search_graph` and `find_connections` so agents can
+   are still returned by `search_graph` and `get_entity_view(mode="edges")` so agents can
    reason about competitors; they're only excluded from the profile layer.
 
 The eligible-kinds set is centralized as
