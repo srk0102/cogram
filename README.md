@@ -34,7 +34,7 @@ Cogram is a framework for building and querying **intent graphs** — temporal c
 - **Engram cache** (Postgres-backed) — repeat LLM calls cost zero
 - **Redis active subgraph** (hot tier, <1ms reads)
 - **Knot synthesis with local Gemma** — pre-compressed hub narratives at $0 marginal cost
-- **MCP server** with 13 tools for Claude Desktop / Cursor / any agent
+- **MCP server** with 14 tools for Claude Desktop / Cursor / any agent — see [docs/agent_playbook.md](docs/agent_playbook.md)
 
 Use Cogram to:
 
@@ -80,7 +80,7 @@ Cogram is a fork of Graphiti, the open-source temporal context graph engine by [
 | Pre-synthesized hub narratives (knots) | – | ✅ Gemma local + GPT fallback |
 | Engram-style decision cache | – | ✅ Postgres-backed |
 | Redis active subgraph (hot tier) | – | ✅ |
-| MCP server (turnkey) | partial (separate `mcp_server` dir) | ✅ baked into core, 13 tools |
+| MCP server (turnkey) | partial (separate `mcp_server` dir) | ✅ baked into core, 14 tools |
 | Multi-DB drivers (Neo4j, FalkorDB, Kuzu, Neptune) | ✅ | ✅ inherited |
 | Bi-temporal model with validity windows | ✅ | ✅ inherited |
 | Hybrid BM25 + vector + graph retrieval | ✅ | ✅ inherited + profile-aware Cypher traversal |
@@ -142,7 +142,7 @@ A future agent in any interface reasons: *"User's vision is legal compliance. So
 | Distilled "how the user thinks" profile | ❌ | partial | – | ✅ |
 | Pre-synthesized agent-ready paragraphs | ❌ | ❌ | ❌ | ✅ Gemma local |
 | Cost on warm reads | scales with LLM | scales with LLM | scales | **near zero** (Engram cache) |
-| MCP server | partial | – | – | ✅ 13 tools |
+| MCP server | partial | – | – | ✅ 14 tools |
 | Self-hostable / OSS | ✅ | hosted SaaS only | ✅ | ✅ Apache 2.0 |
 
 ---
